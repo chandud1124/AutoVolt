@@ -658,74 +658,74 @@ const Users = () => {
           {users.map((user) => (
             <Card key={user.id} className={user.isActive ? '' : 'opacity-75'}>
               <CardHeader className="pb-3">
-                <div className="flex items-center gap-3">
-                  <Avatar>
+                <div className="flex items-center gap-3 min-w-0">
+                  <Avatar className="shrink-0">
                     <AvatarFallback>{getInitials(user.name)}</AvatarFallback>
                   </Avatar>
-                  <div className="flex-1">
-                    <CardTitle className="text-lg flex items-center gap-2">
-                      {visibleColumns.includes('name') && user.name}
+                  <div className="flex-1 min-w-0">
+                    <CardTitle className="text-lg flex items-center gap-2 flex-wrap">
+                      {visibleColumns.includes('name') && <span className="truncate">{user.name}</span>}
                       {myRole === 'admin' && onlineUsers.has(user.id) && (
-                        <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="Online"></span>
+                        <span className="inline-block w-2 h-2 rounded-full bg-green-500 shrink-0" title="Online"></span>
                       )}
                       {me === user.id && (
-                        <Badge variant="outline" className="text-[10px]">You</Badge>
+                        <Badge variant="outline" className="text-[10px] shrink-0">You</Badge>
                       )}
                     </CardTitle>
                     {visibleColumns.includes('email') && (
-                      <p className="text-sm text-muted-foreground truncate" title={user.email}>{user.email}</p>
+                      <p className="text-sm text-muted-foreground truncate break-all" title={user.email}>{user.email}</p>
                     )}
                     {visibleColumns.includes('department') && user.department && (
-                      <p className="text-xs text-muted-foreground">Department: {user.department}</p>
+                      <p className="text-xs text-muted-foreground truncate">Department: {user.department}</p>
                     )}
                     {/* Employee ID and Designation removed from card rendering as requested */}
                     {/* User Status Indicators */}
-                    <div className="flex flex-wrap gap-2 mt-2">
+                    <div className="flex flex-wrap gap-2 mt-2 min-w-0">
                       {/* Removed Active/Inactive badge as requested */}
                       {visibleColumns.includes('isApproved') && user.isApproved === false && (
-                        <Badge variant="secondary">Pending Approval</Badge>
+                        <Badge variant="secondary" className="shrink-0">Pending Approval</Badge>
                       )}
                       {visibleColumns.includes('lastSeen') && user.lastSeen && (
-                        <span className="text-xs text-muted-foreground">Last seen: {new Date(user.lastSeen).toLocaleString()}</span>
+                        <span className="text-xs text-muted-foreground truncate">Last seen: {new Date(user.lastSeen).toLocaleString()}</span>
                       )}
                       {visibleColumns.includes('registrationDate') && user.registrationDate && (
-                        <span className="text-xs text-muted-foreground">Registered: {new Date(user.registrationDate).toLocaleDateString()}</span>
+                        <span className="text-xs text-muted-foreground truncate">Registered: {new Date(user.registrationDate).toLocaleDateString()}</span>
                       )}
                     </div>
                     {/* Profile completeness indicator removed as requested */}
                   </div>
                 </div>
               </CardHeader>
-              <CardContent>
+              <CardContent className="min-w-0">
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Role:</span>
-                    <Badge variant={getRoleColor(user.role)} className="flex items-center gap-1 capitalize">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium shrink-0">Role:</span>
+                    <Badge variant={getRoleColor(user.role)} className="flex items-center gap-1 capitalize shrink-0">
                       {getRoleIcon(user.role)} {user.role}
                     </Badge>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Status:</span>
-                    <Badge variant={user.isActive ? 'default' : 'secondary'}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium shrink-0">Status:</span>
+                    <Badge variant={user.isActive ? 'default' : 'secondary'} className="shrink-0">
                       {user.isActive ? 'Active' : 'Inactive'}
                     </Badge>
                   </div>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     {/* Online status badge removed as requested */}
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Level:</span>
-                    <Badge variant="outline" className="capitalize">{user.roleLevel}</Badge>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium shrink-0">Level:</span>
+                    <Badge variant="outline" className="capitalize shrink-0">{user.roleLevel}</Badge>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Last Login:</span>
-                    <span className="text-xs text-muted-foreground">{formatLastLogin(user.lastLogin)}</span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium shrink-0">Last Login:</span>
+                    <span className="text-xs text-muted-foreground truncate">{formatLastLogin(user.lastLogin)}</span>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Devices:</span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium shrink-0">Devices:</span>
                     <span className="text-xs text-muted-foreground">{user.assignedDevices.length}</span>
                   </div>
-                  <div className="flex gap-2 pt-2">
+                  <div className="flex flex-wrap gap-2 pt-2">
                     <Button size="sm" variant="outline" onClick={() => { setEditingUser(user); setDialogOpen(true); }}>
                       <Edit className="w-3 h-3" />
                     </Button>
