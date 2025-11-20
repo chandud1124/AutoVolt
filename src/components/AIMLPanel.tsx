@@ -190,22 +190,22 @@ const AIMLPanel: React.FC = () => {
     }
   }, [classroom, availableDevices]);
 
-  // Generate time-based labels for working hours only (6 AM - 10 PM)
-  // Note: Labels show full range but forecast only shows consumption during classroom hours (9 AM - 5 PM)
+  // Generate time-based labels for 24-hour forecast
   const generateTimeLabel = (index: number, timeframe: string) => {
     const now = new Date();
+    const currentHour = now.getHours();
 
     switch (timeframe) {
       case '1h':
-        // For hourly, show 6 AM to 10 PM (16 hours)
-        const hour1h = 6 + index; // Start at 6 AM
+        // For hourly, show next 24 hours
+        const hour1h = (currentHour + index + 1) % 24;
         const period1h = hour1h >= 12 ? 'PM' : 'AM';
         const displayHour1h = hour1h > 12 ? hour1h - 12 : hour1h === 0 ? 12 : hour1h;
         return `${displayHour1h}:00 ${period1h}`;
 
       case '24h':
-        // For daily, show working hours only (6 AM - 10 PM)
-        const hour24h = 6 + index; // Start at 6 AM
+        // For daily, show next 24 hours
+        const hour24h = (currentHour + index + 1) % 24;
         const period24h = hour24h >= 12 ? 'PM' : 'AM';
         const displayHour24h = hour24h > 12 ? hour24h - 12 : hour24h === 0 ? 12 : hour24h;
         return `${displayHour24h}:00 ${period24h}`;
@@ -268,7 +268,7 @@ const AIMLPanel: React.FC = () => {
             }
             
             // Call AI service with REAL data only
-            response = await aiMlAPI.forecast(device, historyData, 16);
+            response = await aiMlAPI.forecast(device, historyData, 24);
             
           } catch (historyError: any) {
             console.error('Failed to fetch historical data:', historyError);
@@ -575,6 +575,12 @@ const AIMLPanel: React.FC = () => {
                         tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
                         axisLine={{ stroke: 'hsl(var(--border))', strokeWidth: 1 }}
                         tickLine={false}
+                        label={{ 
+                          value: 'Time (Next 24h)', 
+                          position: 'insideBottom',
+                          offset: -5,
+                          style: { fill: 'hsl(var(--muted-foreground))', fontSize: 11, fontWeight: 600 }
+                        }}
                       />
                       <YAxis 
                         yAxisId='usage' 
@@ -756,9 +762,9 @@ const AIMLPanel: React.FC = () => {
                     <PieChart>
                       <Pie
                         data={[
-                          { name: 'Morning (6-12)', value: forecastData.slice(0, 6).reduce((sum: number, val: number) => sum + val, 0), fill: '#f59e0b' },
-                          { name: 'Afternoon (12-17)', value: forecastData.slice(6, 11).reduce((sum: number, val: number) => sum + val, 0), fill: '#3b82f6' },
-                          { name: 'Evening (17-22)', value: forecastData.slice(11).reduce((sum: number, val: number) => sum + val, 0), fill: '#8b5cf6' },
+                          { name: 'First 8 Hours', value: forecastData.slice(0, 8).reduce((sum: number, val: number) => sum + val, 0), fill: '#f59e0b' },
+                          { name: 'Next 8 Hours', value: forecastData.slice(8, 16).reduce((sum: number, val: number) => sum + val, 0), fill: '#3b82f6' },
+                          { name: 'Last 8 Hours', value: forecastData.slice(16, 24).reduce((sum: number, val: number) => sum + val, 0), fill: '#8b5cf6' },
                         ]}
                         cx='50%'
                         cy='50%'

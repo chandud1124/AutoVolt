@@ -2,6 +2,20 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Bell, X, Check, CheckCheck, AlertTriangle, Info, AlertCircle, Zap } from 'lucide-react';
 import { useNotifications, Notification } from '@/context/NotificationContext';
 import { cn } from '@/lib/utils';
+import { useNavigate } from 'react-router-dom';
+
+// Transform old notification URLs to new dashboard format
+const transformNotificationUrl = (url: string): string => {
+  const adminUserMatch = url.match(/^\/admin\/users\/([a-f0-9]+)$/);
+  if (adminUserMatch) {
+    return `/dashboard/users?userId=${adminUserMatch[1]}`;
+  }
+  const adminUserApproveMatch = url.match(/^\/admin\/users\/([a-f0-9]+)\/approve$/);
+  if (adminUserApproveMatch) {
+    return `/dashboard/users?userId=${adminUserApproveMatch[1]}&action=approve`;
+  }
+  return url;
+};
 
 interface NotificationItemProps {
   notification: Notification;
@@ -14,6 +28,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
   onMarkAsRead,
   onClose
 }) => {
+  const navigate = useNavigate();
+  
   const getPriorityIcon = (priority: string) => {
     switch (priority) {
       case 'urgent':
@@ -120,7 +136,8 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
                     e.stopPropagation();
                     // Handle action click - could navigate to URL or perform action
                     if (action.url) {
-                      window.location.href = action.url;
+                      const transformedUrl = transformNotificationUrl(action.url);
+                      navigate(transformedUrl);
                     }
                   }}
                   className="text-xs bg-primary/10 text-primary px-2 py-1 rounded hover:bg-primary/20"
@@ -138,9 +155,10 @@ const NotificationItem: React.FC<NotificationItemProps> = ({
 
 interface NotificationDropdownProps {
   className?: string;
+  isMobile?: boolean;
 }
 
-export const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ className }) => {
+export const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ className, isMobile = false }) => {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -159,14 +177,20 @@ export const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ clas
 
   // Close dropdown when clicking outside
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: Event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     };
 
+    // Add both mouse and touch event listeners for mobile compatibility
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside);
+    
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+    };
   }, []);
 
   const handleMarkAsRead = async (id: string) => {
@@ -201,8 +225,21 @@ export const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ clas
         )}
       </button>
 
+      {/* Backdrop for mobile */}
+      {isOpen && isMobile && (
+        <div 
+          className="fixed inset-0 bg-black/30 backdrop-blur-[1px] z-40" 
+          onClick={() => setIsOpen(false)}
+        />
+      )}
+
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-80 bg-card rounded-lg shadow-lg border border-border z-50">
+        <div className={cn(
+          "bg-card rounded-lg shadow-lg border border-border z-50",
+          isMobile 
+            ? "fixed top-14 left-4 right-4 w-[calc(100vw-2rem)]" 
+            : "absolute right-0 mt-2 w-80"
+        )}>
           <div className="p-4 border-b border-border">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-foreground">Notifications</h3>

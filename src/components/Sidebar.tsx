@@ -68,7 +68,6 @@ const navigationSections = [
       { name: 'System Health', icon: Server, href: '/dashboard/system-health', requiresPermission: 'canViewAnalytics' },
       { name: 'Analytics & Monitoring', icon: BarChart3, href: '/dashboard/analytics', requiresPermission: 'canViewAnalytics' },
       { name: 'AI/ML Insights', icon: Brain, href: '/dashboard/aiml', requiresPermission: 'canViewAnalytics' },
-      { name: 'Voice Settings', icon: Mic, href: '/dashboard/voice-settings', current: false },
       { name: 'Grafana', icon: Activity, href: '/dashboard/grafana', requiresPermission: 'canViewAnalytics' },
     ]
   },

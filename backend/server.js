@@ -1558,6 +1558,7 @@ apiRouter.use('/aiml', apiLimiter, aimlRoutes);
 apiRouter.use('/settings', apiLimiter, settingsRoutes);
 apiRouter.use('/tickets', apiLimiter, ticketRoutes);
 apiRouter.use('/device-permissions', apiLimiter, devicePermissionRoutes);
+apiRouter.use('/smart-schedule', apiLimiter, require('./routes/smartSchedule'));
 apiRouter.use('/telegram', require('./routes/telegram'));
 apiRouter.use('/device-categories', apiLimiter, deviceCategoryRoutes);
 apiRouter.use('/class-extensions', apiLimiter, classExtensionRoutes);
@@ -1914,7 +1915,7 @@ app.use('*', (req, res) => {
 
 // Start the server (single attempt)
 const PORT = process.env.PORT || 3001; // Changed back to 3001 after debugging
-const HOST = process.env.HOST || '172.16.3.171'; // Bind to specific IP for multi-user access
+const HOST = process.env.HOST || '0.0.0.0'; // Bind to all interfaces for multi-user access
 
 console.log('[DEBUG] About to call server.listen...');
 console.log(`[DEBUG] PORT: ${PORT}, HOST: ${HOST}`);

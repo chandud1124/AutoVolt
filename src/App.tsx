@@ -1,5 +1,5 @@
-import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
+import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Outlet, Navigate } from "react-router-dom";
@@ -50,6 +50,9 @@ const PrometheusPage = lazy(() => import("./pages/PrometheusPage"));
 const SocketTest = lazy(() => import("./components/SocketTest"));
 const NotificationsPage = lazy(() => import("./pages/NotificationsPage"));
 const VoiceSettingsPage = lazy(() => import("./pages/VoiceSettingsPage").then(module => ({ default: module.VoiceSettingsPage })));
+const VerifyEmail = lazy(() => import("./pages/VerifyEmail"));
+const ResendVerification = lazy(() => import("./pages/ResendVerification"));
+const ExtensionRequests = lazy(() => import("./pages/ExtensionRequests"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -114,6 +117,19 @@ const App = () => {
                     <Route path="/login" element={<Login />} />
                     <Route path="/forgot-password" element={<ForgotPassword />} />
                     <Route path="/reset-password/:resetToken" element={<ResetPassword />} />
+                    <Route path="/verify-email" element={
+                      <div className="min-h-screen flex items-center justify-center bg-background">
+                        <div className="max-w-md w-full bg-card rounded-lg shadow-lg p-6 text-center border">
+                          <h1 className="text-xl font-semibold text-foreground mb-4">
+                            Email Verification
+                          </h1>
+                          <p className="text-muted-foreground mb-4">
+                            The verification page is working!
+                          </p>
+                        </div>
+                      </div>
+                    } />
+                    <Route path="/resend-verification" element={<ResendVerification />} />
 
                     {/* Protected Routes */}
                     <Route
@@ -148,6 +164,7 @@ const App = () => {
                       <Route path="prometheus" element={<PrometheusPage />} />
                       <Route path="socket-test" element={<SocketTest />} />
                       <Route path="notifications" element={<NotificationsPage />} />
+                      <Route path="extensions" element={<ExtensionRequests />} />
                     </Route>
 
                     <Route path="*" element={<NotFound />} />

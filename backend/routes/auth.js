@@ -8,6 +8,8 @@ const {
   changePassword,
   forgotPassword,
   resetPassword,
+  verifyEmail,
+  resendVerificationEmail,
   getPendingPermissionRequests,
   approvePermissionRequest,
   rejectPermissionRequest,
@@ -92,6 +94,14 @@ router.post('/reset-password/:resetToken',
   [body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')],
   handleValidationErrors,
   resetPassword
+);
+
+// Email verification routes
+router.get('/verify-email/:token', verifyEmail);
+router.post('/resend-verification',
+  [body('email').isEmail().withMessage('Please provide a valid email')],
+  handleValidationErrors,
+  resendVerificationEmail
 );
 
 // Permission request routes

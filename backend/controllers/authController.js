@@ -1,4 +1,3 @@
-
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
@@ -7,7 +6,7 @@ const PermissionRequest = require('../models/PermissionRequest');
 const ClassExtensionRequest = require('../models/ClassExtensionRequest');
 const Notification = require('../models/Notification');
 const ActivityLog = require('../models/ActivityLog');
-const { sendPasswordResetEmail } = require('../services/emailService');
+const { sendPasswordResetEmail, sendEmailVerification } = require('../services/emailService');
 const { logger } = require('../middleware/logger');
 
 const generateToken = (id) => {
@@ -313,6 +312,22 @@ const register = async (req, res) => {
 
     logger.info(`New user registered: ${user.name} (${user.email}) - Role: ${user.role}`);
 
+    // Generate email verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    user.emailVerificationToken = crypto.createHash('sha256').update(verificationToken).digest('hex');
+    user.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+    await user.save();
+
+    // Send email verification
+    try {
+      const verificationUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email/${verificationToken}`;
+      await sendEmailVerification(user.email, verificationUrl, user.name);
+      logger.info(`Email verification sent to ${user.email}`);
+    } catch (emailError) {
+      logger.error('Error sending verification email:', emailError);
+      // Don't fail registration if email fails
+    }
+
     // Send notifications to all admins about new registration
     try {
       const adminRoles = ['super-admin', 'admin'];
@@ -364,7 +379,8 @@ const register = async (req, res) => {
     // Return success response
     res.status(201).json({
       success: true,
-      message: 'Registration successful! Your account is pending admin approval.',
+      message: 'Registration successful! Please check your email to verify your account.',
+      requiresEmailVerification: true,
       user: {
         id: user._id,
         name: user.name,
@@ -372,7 +388,8 @@ const register = async (req, res) => {
         role: user.role,
         department: user.department,
         isActive: user.isActive,
-        isApproved: user.isApproved
+        isApproved: user.isApproved,
+        emailVerified: user.emailVerified
       }
     });
 
@@ -652,30 +669,64 @@ const changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
+    console.log(`[changePassword] =====================================`);
+    console.log(`[changePassword] Request for user ${req.user.id}`);
+    console.log(`[changePassword] User email: ${req.user.email || 'unknown'}`);
+    console.log(`[changePassword] Current password length: ${currentPassword?.length || 0}`);
+    console.log(`[changePassword] New password length: ${newPassword?.length || 0}`);
+
     // Validate input
     if (!currentPassword || !newPassword) {
+      console.log('[changePassword] ❌ Missing password fields');
       return res.status(400).json({ message: 'Current password and new password are required' });
     }
 
     if (newPassword.length < 6) {
+      console.log('[changePassword] ❌ New password too short');
       return res.status(400).json({ message: 'New password must be at least 6 characters long' });
     }
 
     // Get user with password
     const user = await User.findById(req.user.id).select('+password');
     if (!user) {
+      console.log('[changePassword] ❌ User not found in database');
       return res.status(404).json({ message: 'User not found' });
     }
 
+    console.log(`[changePassword] Found user: ${user.email}`);
+    console.log(`[changePassword] Current password hash: ${user.password.substring(0, 20)}...`);
+
     // Check current password
     const isMatch = await user.matchPassword(currentPassword);
+    console.log(`[changePassword] Password match result: ${isMatch}`);
+    
     if (!isMatch) {
+      console.log('[changePassword] ❌ Current password is incorrect');
       return res.status(400).json({ message: 'Current password is incorrect' });
     }
 
+    console.log('[changePassword] ✅ Current password verified');
+    console.log('[changePassword] Updating password...');
+    
+    // Store old hash for verification
+    const oldHash = user.password;
+    
     // Update password
     user.password = newPassword;
+    console.log(`[changePassword] isModified('password'): ${user.isModified('password')}`);
+    
     await user.save();
+    console.log('[changePassword] ✅ User document saved');
+    
+    // Verify the hash changed
+    const updatedUser = await User.findById(req.user.id).select('+password');
+    console.log(`[changePassword] New password hash: ${updatedUser.password.substring(0, 20)}...`);
+    console.log(`[changePassword] Hash changed: ${oldHash !== updatedUser.password}`);
+    
+    // Verify new password works
+    const newMatches = await updatedUser.matchPassword(newPassword);
+    console.log(`[changePassword] New password verification: ${newMatches}`);
+    console.log('[changePassword] =====================================');
 
     logger.info(`Password changed for user: ${user.email}`, {
       action: 'CHANGE_PASSWORD',
@@ -687,7 +738,7 @@ const changePassword = async (req, res) => {
       message: 'Password changed successfully'
     });
   } catch (error) {
-    console.error('Change password error:', error);
+    console.error('[changePassword] ❌ Server error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
@@ -921,7 +972,8 @@ const requestClassExtension = async (req, res) => {
       reason,
       roomNumber,
       subject,
-      classDetails
+      classDetails,
+      additionalNotes
     } = req.body;
 
     // Verify user can request extensions
@@ -937,19 +989,23 @@ const requestClassExtension = async (req, res) => {
     }
 
     // Check if user owns this schedule or is authorized
-    if (schedule.facultyId.toString() !== req.user.id && !['admin', 'dean', 'faculty', 'super-admin'].includes(req.user.role)) {
-      return res.status(403).json({ message: 'You can only request extensions for your own classes' });
+    // Device schedules don't have facultyId, so allow faculty and above to extend any schedule
+    const isAuthorized = ['admin', 'dean', 'faculty', 'super-admin'].includes(req.user.role) ||
+      (schedule.facultyId && schedule.facultyId.toString() === req.user.id);
+    
+    if (!isAuthorized) {
+      return res.status(403).json({ message: 'You can only request extensions for your own classes or device schedules' });
     }
 
     const extensionRequest = await ClassExtensionRequest.create({
       requestedBy: req.user.id,
       scheduleId,
-      originalEndTime: schedule.endTime,
+      originalEndTime: schedule.time || schedule.endTime || new Date(),
       requestedEndTime: new Date(requestedEndTime),
-      reason,
-      roomNumber: roomNumber || schedule.roomNumber,
-      subject: subject || schedule.subject,
-      classDetails
+      reason: reason || additionalNotes || 'Extension requested',
+      roomNumber: roomNumber || schedule.roomNumber || 'Device Schedule',
+      subject: subject || schedule.subject || schedule.name || 'Automated Schedule',
+      classDetails: classDetails || `Device schedule: ${schedule.name}`
     });
 
     // Check for conflicts
@@ -1222,6 +1278,137 @@ const getUnreadNotificationCount = async (req, res) => {
   }
 };
 
+const verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Verification token is required'
+      });
+    }
+
+    // Hash the token to match stored hash
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    // Find user with this token that hasn't expired
+    const user = await User.findOne({
+      emailVerificationToken: hashedToken,
+      emailVerificationExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired verification token'
+      });
+    }
+
+    // Mark email as verified
+    user.emailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save();
+
+    logger.info(`Email verified for user: ${user.email}`);
+
+    // Notify admins that user has verified email
+    try {
+      const adminRoles = ['super-admin', 'admin'];
+      const admins = await User.find({
+        role: { $in: adminRoles },
+        isActive: true,
+        isApproved: true
+      }).select('_id');
+
+      if (req.app.get('io')) {
+        admins.forEach(admin => {
+          req.app.get('io').to(`user_${admin._id}`).emit('notification', {
+            type: 'email_verified',
+            title: 'User Email Verified',
+            message: `${user.name} has verified their email and is ready for approval`,
+            userId: user._id,
+            userName: user.name,
+            userEmail: user.email
+          });
+        });
+      }
+    } catch (notificationError) {
+      logger.error('Error sending verification notifications:', notificationError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully! Your account is now pending admin approval.',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        emailVerified: user.emailVerified
+      }
+    });
+
+  } catch (error) {
+    logger.error('Email verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during email verification',
+      error: error.message
+    });
+  }
+};
+
+const resendVerificationEmail = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    const user = await User.findOne({ 
+      email: email.toLowerCase().trim(),
+      emailVerified: false
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found or email already verified'
+      });
+    }
+
+    // Generate new verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    user.emailVerificationToken = crypto.createHash('sha256').update(verificationToken).digest('hex');
+    user.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+    await user.save();
+
+    // Send verification email
+    const verificationUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email/${verificationToken}`;
+    await sendEmailVerification(user.email, verificationUrl, user.name);
+
+    logger.info(`Verification email resent to ${user.email}`);
+
+    res.json({
+      success: true,
+      message: 'Verification email sent! Please check your inbox.'
+    });
+
+  } catch (error) {
+    logger.error('Resend verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error sending verification email',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -1230,6 +1417,8 @@ module.exports = {
   changePassword,
   forgotPassword,
   resetPassword,
+  verifyEmail,
+  resendVerificationEmail,
   getPendingPermissionRequests,
   approvePermissionRequest,
   rejectPermissionRequest,

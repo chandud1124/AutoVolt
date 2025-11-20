@@ -1,10 +1,24 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardHeader, CardContent, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+
+// Transform old notification URLs to new dashboard format
+const transformNotificationUrl = (url: string): string => {
+  const adminUserMatch = url.match(/^\/admin\/users\/([a-f0-9]+)$/);
+  if (adminUserMatch) {
+    return `/dashboard/users?userId=${adminUserMatch[1]}`;
+  }
+  const adminUserApproveMatch = url.match(/^\/admin\/users\/([a-f0-9]+)\/approve$/);
+  if (adminUserApproveMatch) {
+    return `/dashboard/users?userId=${adminUserApproveMatch[1]}&action=approve`;
+  }
+  return url;
+};
 import {
     Bell,
     CheckCircle,
@@ -55,6 +69,7 @@ const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
     onClose,
     className = ''
 }) => {
+    const navigate = useNavigate();
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [loading, setLoading] = useState(false);
     const [unreadCount, setUnreadCount] = useState(0);
@@ -301,7 +316,8 @@ const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
                                                                                         e.stopPropagation();
                                                                                         // Handle action click
                                                                                         if (action.url) {
-                                                                                            window.location.href = action.url;
+                                                                                            const transformedUrl = transformNotificationUrl(action.url);
+                                                                                            navigate(transformedUrl);
                                                                                         }
                                                                                     }}
                                                                                 >
@@ -374,7 +390,8 @@ const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
                                                                                     onClick={(e) => {
                                                                                         e.stopPropagation();
                                                                                         if (action.url) {
-                                                                                            window.location.href = action.url;
+                                                                                            const transformedUrl = transformNotificationUrl(action.url);
+                                                                                            navigate(transformedUrl);
                                                                                         }
                                                                                     }}
                                                                                 >

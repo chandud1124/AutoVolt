@@ -6,7 +6,7 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   server: {
     // Connect to your backend server
-    url: 'http://172.16.3.171:5173',
+    url: 'http://172.16.3.171:5173/',
     cleartext: true, // Allow HTTP in development
     androidScheme: 'http'
   },

@@ -147,7 +147,7 @@ export function Header() {
 
         {/* Notifications */}
         <div className="flex-shrink-0">
-          <NotificationDropdown />
+          <NotificationDropdown isMobile={isMobile} />
         </div>
 
         {/* Time Limit Alerts */}

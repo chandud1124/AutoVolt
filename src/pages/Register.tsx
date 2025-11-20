@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Checkbox } from '@/components/ui/checkbox';
 import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
-import { Eye, EyeOff, ArrowLeft, Upload, CheckCircle, AlertCircle, Info, Home } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, Upload, CheckCircle, AlertCircle, Info, Home, LogIn } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { authAPI } from '@/services/api';
@@ -205,11 +205,11 @@ const Register: React.FC = () => {
 
       toast({
         title: 'Registration Successful',
-        description: "Your account registration has been submitted and is pending admin approval. You'll receive an email notification once reviewed.",
-        duration: 8000
+        description: "Please check your email to verify your account. After verification, your registration will be pending admin approval.",
+        duration: 10000
       });
 
-      setTimeout(() => navigate('/login'), 5000);
+      setTimeout(() => navigate('/login'), 6000);
     } catch (err: unknown) {
       let message = 'Failed to connect to the server. Please try again.';
       let validationErrors: string[] = [];
@@ -505,10 +505,10 @@ const Register: React.FC = () => {
         variant="ghost"
         size="sm"
         className="absolute top-4 left-4 gap-2"
-        onClick={() => navigate('/landing')}
+        onClick={() => navigate('/login')}
       >
-        <Home className="h-4 w-4" />
-        Back to Home
+        <LogIn className="h-4 w-4" />
+        Back to Login
       </Button>
       
       <div className="text-center mb-8">

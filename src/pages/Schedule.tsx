@@ -193,7 +193,8 @@ const Schedule: React.FC = () => {
       socketService.off('schedule_created', handleScheduleCreated);
       socketService.off('schedule_updated', handleScheduleUpdated);
     };
-  }, [toast]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Remove toast from dependencies to prevent unnecessary refetches
 
   const runScheduleNow = async (scheduleId: string) => {
     try {
@@ -306,7 +307,7 @@ const Schedule: React.FC = () => {
                         {schedule.switches.length} device(s) selected
                       </div>
                     </div>
-                    <div className="flex gap-2 pt-2">
+                    <div className="flex flex-wrap gap-2 pt-2">
                       <Button
                         size="sm"
                         variant="outline"
@@ -339,30 +340,6 @@ const Schedule: React.FC = () => {
                       >
                         <Trash2 className="w-3 h-3" />
                       </Button>
-                      <Dialog open={!!confirmDeleteId} onOpenChange={() => setConfirmDeleteId(null)}>
-                        <DialogContent>
-                          <DialogHeader>
-                            <DialogTitle>Delete Schedule</DialogTitle>
-                            <DialogDescription>
-                              Are you sure you want to delete this schedule? This action cannot be undone.
-                            </DialogDescription>
-                          </DialogHeader>
-                          <DialogFooter>
-                            <Button variant="outline" onClick={() => setConfirmDeleteId(null)}>
-                              Cancel
-                            </Button>
-                            <Button
-                              variant="destructive"
-                              onClick={async () => {
-                                await handleDeleteSchedule(confirmDeleteId);
-                                setConfirmDeleteId(null);
-                              }}
-                            >
-                              Delete
-                            </Button>
-                          </DialogFooter>
-                        </DialogContent>
-                      </Dialog>
                     </div>
                   </div>
                 </CardContent>
@@ -380,6 +357,31 @@ const Schedule: React.FC = () => {
           onSave={editingSchedule ? handleEditSchedule : handleAddSchedule}
           schedule={editingSchedule}
         />
+
+        <Dialog open={!!confirmDeleteId} onOpenChange={() => setConfirmDeleteId(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete Schedule</DialogTitle>
+              <DialogDescription>
+                Are you sure you want to delete this schedule? This action cannot be undone.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setConfirmDeleteId(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={async () => {
+                  await handleDeleteSchedule(confirmDeleteId);
+                  setConfirmDeleteId(null);
+                }}
+              >
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </>
   );

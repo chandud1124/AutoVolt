@@ -2,8 +2,28 @@ import React, { useState, useEffect } from 'react';
 import { Bell, CheckCheck, Trash2, Filter, Search, AlertTriangle, Info, AlertCircle } from 'lucide-react';
 import { useNotifications, Notification } from '@/context/NotificationContext';
 import { cn } from '@/lib/utils';
+import { useNavigate } from 'react-router-dom';
+
+// Transform old notification URLs to new dashboard format
+const transformNotificationUrl = (url: string): string => {
+  // Convert /admin/users/:userId to /dashboard/users?userId=:userId
+  const adminUserMatch = url.match(/^\/admin\/users\/([a-f0-9]+)$/);
+  if (adminUserMatch) {
+    return `/dashboard/users?userId=${adminUserMatch[1]}`;
+  }
+  
+  // Convert /admin/users/:userId/approve to /dashboard/users?userId=:userId&action=approve
+  const adminUserApproveMatch = url.match(/^\/admin\/users\/([a-f0-9]+)\/approve$/);
+  if (adminUserApproveMatch) {
+    return `/dashboard/users?userId=${adminUserApproveMatch[1]}&action=approve`;
+  }
+  
+  // Return as-is if already in correct format or unknown format
+  return url;
+};
 
 const NotificationsPage: React.FC = () => {
+  const navigate = useNavigate();
   const [filter, setFilter] = useState<'all' | 'unread' | 'read'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedNotifications, setSelectedNotifications] = useState<Set<string>>(new Set());
@@ -313,7 +333,8 @@ const NotificationsPage: React.FC = () => {
                                 key={index}
                                 onClick={() => {
                                   if (action.url) {
-                                    window.location.href = action.url;
+                                    const transformedUrl = transformNotificationUrl(action.url);
+                                    navigate(transformedUrl);
                                   }
                                   // Handle other actions here
                                 }}

@@ -1541,6 +1541,39 @@ class TelegramService {
       );
     }
   }
+
+  // Get bot information from Telegram API
+  async getBotInfo() {
+    try {
+      if (!this.botToken) {
+        throw new Error('Telegram bot token not configured');
+      }
+
+      const response = await axios.get(`${this.baseUrl}/getMe`);
+
+      if (!response.data.ok) {
+        throw new Error(`Telegram API error: ${response.data.description}`);
+      }
+
+      const bot = response.data.result;
+
+      return {
+        id: bot.id,
+        username: bot.username,
+        firstName: bot.first_name,
+        lastName: bot.last_name || null,
+        canJoinGroups: bot.can_join_groups,
+        canReadAllGroupMessages: bot.can_read_all_group_messages,
+        supportsInlineQueries: bot.supports_inline_queries,
+        isInitialized: this.isInitialized,
+        pollingActive: !!this.pollingInterval,
+        webhookActive: !!this.webhookUrl
+      };
+    } catch (error) {
+      console.error('Error getting bot info:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new TelegramService();

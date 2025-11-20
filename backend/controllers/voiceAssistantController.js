@@ -124,10 +124,28 @@ function detectAction(command) {
 }
 
 function extractRoomPhrase(command) {
-  const roomMatch = command.match(/(?:in|at|inside|within)\s+([a-z0-9\-\s]+)/);
-  if (roomMatch) {
-    return roomMatch[1].replace(/\b(classroom|room|block|building)\b/g, '').trim();
+  // Try multiple patterns to extract room name
+  const patterns = [
+    /(?:in|at|inside|within|for)\s+(?:the\s+)?([a-z0-9\-\s]+?)(?:\s+(?:classroom|room|lab|block|building|hall|area|zone))?(?:\s|$)/,
+    /(?:in|at|inside|within|for)\s+(?:the\s+)?([a-z0-9\-\s]+)/
+  ];
+  
+  for (const pattern of patterns) {
+    const roomMatch = command.match(pattern);
+    if (roomMatch) {
+      let room = roomMatch[1]
+        .replace(/\b(classroom|room|lab|block|building|hall|area|zone)\b/g, '')
+        .trim();
+      
+      // Remove trailing filler words
+      room = room.replace(/\b(the|a|an)$/g, '').trim();
+      
+      if (room.length > 0) {
+        return room;
+      }
+    }
   }
+  
   return null;
 }
 
@@ -989,15 +1007,19 @@ async function processVoiceCommand(command, deviceName, switchName, user) {
     let candidateDevices = allDevices;
 
     if (interpretation.roomPhrase) {
+      logger.info(`[Voice Command] Filtering by room: "${interpretation.roomPhrase}" (${candidateDevices.length} candidates)`);
       const roomMatches = filterDevicesByPhrase(candidateDevices, interpretation.roomPhrase, ['classroom', 'location', 'name', 'block', 'floor', 'voiceAliases']);
       if (!roomMatches.length) {
+        const availableRooms = [...new Set(candidateDevices.map(d => d.classroom || d.location).filter(Boolean))];
+        logger.warn(`[Voice Command] No room matches for "${interpretation.roomPhrase}". Available: ${availableRooms.join(', ')}`);
         return {
           success: false,
-          message: `Couldn't find any devices in "${interpretation.roomPhrase}". Try the classroom name, block, or floor shown on the dashboard.`,
+          message: `Couldn't find any devices in "${interpretation.roomPhrase}". Available rooms: ${availableRooms.slice(0, 3).join(', ')}${availableRooms.length > 3 ? '...' : ''}`,
           actionType: 'lookup_failed',
-          context: { interpretation, ...contextNotes }
+          context: { interpretation, ...contextNotes, availableRooms }
         };
       }
+      logger.info(`[Voice Command] Found ${roomMatches.length} devices in room`);
       candidateDevices = roomMatches;
     }
 
@@ -1293,19 +1315,24 @@ function filterDevicesByPhrase(devices, phrase, keys) {
   }
 
   const search = phrase.toLowerCase().trim();
+  logger.info(`[Voice Filter] Searching for "${search}" in ${devices.length} devices with keys: ${keys.join(', ')}`);
   
   // Extract numeric values from phrase for better floor/block matching
   const numericMatch = search.match(/\d+/);
   const hasNumber = numericMatch !== null;
   
-  const directMatches = devices.filter((device) =>
-    keys.some((key) => {
+  // First try direct/partial string matching
+  const directMatches = devices.filter((device) => {
+    const matched = keys.some((key) => {
       const value = device[key];
       if (value === null || value === undefined) return false;
       
       // Handle array values (like voiceAliases)
       if (Array.isArray(value)) {
-        return value.some((entry) => entry?.toString?.().toLowerCase().includes(search));
+        return value.some((entry) => {
+          const entryStr = entry?.toString?.().toLowerCase();
+          return entryStr && entryStr.includes(search);
+        });
       }
       
       const valueStr = value.toString().toLowerCase();
@@ -1316,27 +1343,52 @@ function filterDevicesByPhrase(devices, phrase, keys) {
         return numericMatch.some(num => deviceNumeric === num);
       }
       
-      // Regular string matching
-      return valueStr.includes(search);
-    })
-  );
+      // Try both substring and word boundary matching
+      if (valueStr.includes(search)) return true;
+      
+      // Check if search words are all in the value
+      const searchWords = search.split(/\s+/).filter(w => w.length > 2);
+      if (searchWords.length > 0) {
+        return searchWords.every(word => valueStr.includes(word));
+      }
+      
+      return false;
+    });
+    
+    if (matched) {
+      logger.debug(`[Voice Filter] Direct match: ${device.name} (${device.classroom || device.location})`);
+    }
+    return matched;
+  });
 
   if (directMatches.length) {
+    logger.info(`[Voice Filter] Found ${directMatches.length} direct matches`);
     return directMatches;
   }
 
+  // Fallback to fuzzy search with Fuse.js
+  logger.debug(`[Voice Filter] No direct matches, trying fuzzy search...`);
   const fuse = upsertFuse(devices, keys);
   const results = fuse.search(search);
+  
   if (!results.length) {
+    logger.warn(`[Voice Filter] No matches found for "${search}"`);
+    logger.debug(`[Voice Filter] Available devices: ${devices.map(d => `${d.name} (${d.classroom || d.location})`).join(', ')}`);
     return [];
   }
 
   const bestScore = results[0].score ?? 0;
   const cutoff = bestScore + 0.2;
-
-  return results
+  const fuzzyMatches = results
     .filter((result) => (result.score ?? 0) <= cutoff)
     .map((result) => result.item);
+  
+  logger.info(`[Voice Filter] Found ${fuzzyMatches.length} fuzzy matches (best score: ${bestScore})`);
+  fuzzyMatches.forEach(d => {
+    logger.debug(`[Voice Filter] Fuzzy match: ${d.name} (${d.classroom || d.location})`);
+  });
+
+  return fuzzyMatches;
 }
 
 function buildDeviceInfo(device) {

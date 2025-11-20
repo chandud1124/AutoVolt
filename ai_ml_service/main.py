@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -12,87 +12,23 @@ from sklearn.preprocessing import StandardScaler
 import joblib
 import os
 from pathlib import Path
-import mlflow
 
-# Configure logging FIRST
-logging.basicConfig(level=logging.WARNING)  # Reduced logging level
+# Prophet import with fallback
+try:
+    from prophet import Prophet
+    PROPHET_AVAILABLE = True
+except ImportError:
+    PROPHET_AVAILABLE = False
+    logging.warning("Prophet not installed. Using fallback forecasting methods.")
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import advanced AI components with fallbacks
-try:
-    from mlflow_manager import get_mlflow_manager
-    MLFLOW_AVAILABLE = True
-except ImportError as e:
-    MLFLOW_AVAILABLE = False
-    logger.warning(f"MLflow not available - model management disabled: {e}")
-    
-    # Create dummy MLflow manager
-    def get_mlflow_manager():
-        return None
-
-try:
-    from advanced_ai_features import get_ai_components
-    ADVANCED_AI_AVAILABLE = True
-except ImportError as e:
-    ADVANCED_AI_AVAILABLE = False
-    logger.warning(f"Advanced AI features not available - using basic functionality: {e}")
-    
-    # Create dummy functions for fallback
-    def get_ai_components():
-        return {
-            'anomaly_detector': None,
-            'predictive_maintenance': None,
-            'vision_monitor': None,
-            'conversational_assistant': None
-        }
-
-# Prophet import with fallback - moved to lazy loading
-PROPHET_AVAILABLE = False  # Will be set to True when actually imported
-
-def get_prophet():
-    """Lazy import of Prophet to avoid matplotlib issues"""
-    global PROPHET_AVAILABLE
-    if not PROPHET_AVAILABLE:
-        try:
-            from prophet import Prophet as _Prophet
-            PROPHET_AVAILABLE = True
-            return _Prophet
-        except ImportError as e:
-            logger.warning(f"Prophet not available: {e}")
-            # Create dummy Prophet class
-            class DummyProphet:
-                def __init__(self, **kwargs): pass
-                def fit(self, df): pass
-                def predict(self, future): 
-                    return pd.DataFrame({'yhat': [0] * len(future), 'yhat_lower': [0] * len(future), 'yhat_upper': [0] * len(future)})
-            return DummyProphet
-    else:
-        from prophet import Prophet as _Prophet
-        return _Prophet
-
-# Scikit-learn imports with fallbacks
-try:
-    from sklearn.ensemble import IsolationForest
-    from sklearn.preprocessing import StandardScaler
-    SCIKIT_AVAILABLE = True
-except ImportError:
-    SCIKIT_AVAILABLE = False
-    logger.warning("Scikit-learn not available. ML features will be limited.")
-    # Create dummy classes for fallback
-    class IsolationForest:
-        def __init__(self, **kwargs): pass
-        def fit(self, X): pass
-        def predict(self, X): return [1] * len(X)
-        def decision_function(self, X): return [0.5] * len(X)
-    
-    class StandardScaler:
-        def fit_transform(self, X): return X
-        def transform(self, X): return X
-
 app = FastAPI(
-    title="Advanced AI/ML Microservice",
-    description="Advanced AI/ML service for IoT classroom automation with MLflow, anomaly detection, predictive maintenance, NLP, and computer vision",
-    version="3.0.0"
+    title="AI/ML Microservice",
+    description="AI/ML service for IoT classroom automation system with enhanced forecasting",
+    version="2.0.0"
 )
 
 # Add CORS middleware
@@ -104,133 +40,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize AI components - lazy loaded
-_mlflow_manager = None
-_ai_components = None
-
-def get_mlflow_manager_lazy():
-    global _mlflow_manager
-    if _mlflow_manager is None and MLFLOW_AVAILABLE:
-        from mlflow_manager import get_mlflow_manager as _get_mlflow_manager
-        _mlflow_manager = _get_mlflow_manager()
-    return _mlflow_manager
-
-def get_ai_components_lazy():
-    global _ai_components
-    if _ai_components is None and ADVANCED_AI_AVAILABLE:
-        from advanced_ai_features import get_ai_components as _get_ai_components
-        _ai_components = _get_ai_components()
-    return _ai_components
-
-# Create directories
+# Create models directory
 MODELS_DIR = Path("./models")
-UPLOAD_DIR = Path("./uploads")
 MODELS_DIR.mkdir(exist_ok=True)
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-# Global model storage
-anomaly_detectors = {}
-forecast_models = {}
 
 # Pydantic models
 class ForecastRequest(BaseModel):
     device_id: str
     history: List[float]
-    periods: int = 5
-
-class AnomalyDetectionRequest(BaseModel):
-    device_id: str
-    data: List[Dict[str, Any]]
-    device_type: str = "generic"
-
-class PredictiveMaintenanceRequest(BaseModel):
-    device_id: str
-    historical_data: List[Dict[str, Any]]
-    device_type: str
-
-class VoiceCommandRequest(BaseModel):
-    text: str
-    language: str = "en"
-
-class ConversationalChatRequest(BaseModel):
-    text: str
-    conversation_history: Optional[List[Dict[str, str]]] = []
-    user_id: Optional[str] = "default_user"
-
-class EntityUpdateRequest(BaseModel):
-    devices: List[str]
-    locations: List[str]
-
-class ComputerVisionRequest(BaseModel):
-    device_id: str
-    device_type: str
-    analysis_type: str = "status"  # status, defect, monitoring
-
-class MLflowModelRequest(BaseModel):
-    model_name: str
-    version: Optional[str] = None
-    stage: str = "Production"
-
-class ABTestRequest(BaseModel):
-    experiment_name: str
-    variants: Dict[str, str]  # variant_name -> model_version
-    traffic_distribution: Optional[Dict[str, float]] = None
-
-# Response models
-class ForecastResponse(BaseModel):
-    device_id: str
-    forecast: List[float]
-    confidence_intervals: Optional[List[Dict[str, float]]] = None
-    timestamp: str
-
-class AnomalyResponse(BaseModel):
-    device_id: str
-    anomalies: List[int]
-    scores: List[float]
-    threshold: float
-    timestamp: str
-    anomaly_rate: float
-
-class MaintenancePrediction(BaseModel):
-    device_id: str
-    failure_probability: float
-    maintenance_priority: str
-    days_to_maintenance: int
-    recommendations: List[str]
-    timestamp: str
-
-class VoiceCommandResponse(BaseModel):
-    original_text: str
-    intent: str
-    confidence: float
-    entities: Dict[str, List[str]]
-    parsed_command: Dict[str, Any]
-    timestamp: str
-
-class ConversationalChatResponse(BaseModel):
-    response_text: str
-    action: Optional[Dict[str, Any]] = None
-    conversation_history: List[Dict[str, str]]
-    timestamp: str
-
-class ComputerVisionResponse(BaseModel):
-    device_id: str
-    device_type: str
-    analysis_type: str
-    detections: List[Dict[str, Any]]
-    defects: List[Dict[str, Any]]
-    status: str
-    health_score: float
-    recommendations: List[str]
-    timestamp: str
-
-class MLflowModelResponse(BaseModel):
-    model_name: str
-    version: str
-    stage: str
-    metrics: Dict[str, float]
-    loaded: bool
-    timestamp: str
+    periods: int = 24
 
 class ScheduleRequest(BaseModel):
     device_id: str
@@ -309,9 +127,7 @@ class AnomalyDetector:
         if not self.trained:
             # Initial training
             self.train(new_data)
-            # Return initial scores after training
-            scores = self.model.decision_function(new_data.reshape(-1, 1))
-            return [], scores.tolist()  # No anomalies in baseline but return scores
+            return [], []  # No anomalies in baseline
         
         # Predict on new data
         scores = self.model.decision_function(new_data.reshape(-1, 1))
@@ -419,47 +235,89 @@ async def health_check():
     return {
         "status": "healthy",
         "prophet_available": PROPHET_AVAILABLE,
-        "scikit_available": SCIKIT_AVAILABLE,
-        "mlflow_available": MLFLOW_AVAILABLE,
-        "advanced_ai_available": ADVANCED_AI_AVAILABLE,
         "models_dir": str(MODELS_DIR),
         "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/forecast", response_model=ForecastResponse)
 async def forecast_usage(request: ForecastRequest):
-    """Enhanced forecasting with Prophet or fallback methods"""
+    """Enhanced forecasting with time-based patterns for classroom usage"""
     try:
         device_id = request.device_id
         history = request.history
         periods = request.periods
         
+        # Get current hour to apply time-based patterns
+        current_time = datetime.now()
+        
         # Validate data quality
         if len(history) < 3:
-            raise HTTPException(
-                status_code=400,
-                detail="Need at least 3 data points for forecasting"
+            # Apply time-based patterns even for simple forecasts
+            avg = np.mean(history) if len(history) > 0 else 50.0
+            forecasts = []
+            confidences = []
+            
+            for i in range(periods):
+                future_time = current_time + timedelta(hours=i+1)
+                future_hour = future_time.hour
+                future_minute = future_time.minute
+                
+                # Major consumption: 9 AM - 5 PM (peak usage)
+                if 9 <= future_hour < 17:
+                    forecasts.append(avg * 1.0)  # Full consumption
+                    confidences.append(0.4)
+                # Low consumption: 5 PM - 6:30 PM (computer lab only)
+                elif 17 <= future_hour < 18 or (future_hour == 18 and future_minute < 30):
+                    forecasts.append(avg * 0.3)  # 30% - computer lab only
+                    confidences.append(0.4)
+                # Zero consumption: After 6:30 PM and before 9 AM
+                else:
+                    forecasts.append(0.0)  # No consumption
+                    confidences.append(0.5)
+            
+            return ForecastResponse(
+                device_id=device_id,
+                forecast=forecasts,
+                confidence=confidences,
+                timestamp=current_time.isoformat(),
+                model_type="time_based_simple"
             )
         
         # Check for data quality issues
         if len(history) < 7 or not PROPHET_AVAILABLE:
             logger.warning(f"Limited data ({len(history)} points) or Prophet unavailable for {device_id}")
             predictions, confidence = simple_moving_average_forecast(history, periods)
+            
+            # Apply time-based adjustments for classroom patterns
+            adjusted_predictions = []
+            for i, pred in enumerate(predictions):
+                future_time = current_time + timedelta(hours=i+1)
+                future_hour = future_time.hour
+                future_minute = future_time.minute
+                
+                # Major consumption: 9 AM - 5 PM
+                if 9 <= future_hour < 17:
+                    adjusted_predictions.append(pred * 1.0)  # Peak hours
+                # Low consumption: 5 PM - 6:30 PM (computer lab)
+                elif 17 <= future_hour < 18 or (future_hour == 18 and future_minute < 30):
+                    adjusted_predictions.append(pred * 0.35)  # Computer lab only
+                # Zero consumption: After 6:30 PM and before 9 AM
+                else:
+                    adjusted_predictions.append(0.0)  # No consumption
+            
             return ForecastResponse(
                 device_id=device_id,
-                forecast=predictions,
+                forecast=adjusted_predictions,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
-                model_type="moving_average"
+                timestamp=current_time.isoformat(),
+                model_type="time_adjusted_moving_average"
             )
         
         # Use Prophet for advanced forecasting
         try:
-            Prophet = get_prophet()
-            
             # Prepare data for Prophet (requires 'ds' and 'y' columns)
             df = pd.DataFrame({
-                'ds': pd.date_range(end=datetime.now(), periods=len(history), freq='h'),
+                'ds': pd.date_range(end=datetime.now(), periods=len(history), freq='H'),
                 'y': history
             })
             
@@ -486,7 +344,7 @@ async def forecast_usage(request: ForecastRequest):
             model.fit(df)
             
             # Make future dataframe
-            future = model.make_future_dataframe(periods=periods, freq='h')
+            future = model.make_future_dataframe(periods=periods, freq='H')
             future['is_school_hours'] = future['ds'].dt.hour.between(9, 17)
             
             # Predict
@@ -497,24 +355,44 @@ async def forecast_usage(request: ForecastRequest):
             lower_bound = forecast['yhat_lower'].tail(periods).tolist()
             upper_bound = forecast['yhat_upper'].tail(periods).tolist()
             
+            # Apply time-based adjustments for realistic classroom patterns
+            adjusted_predictions = []
+            for i, pred in enumerate(predictions):
+                future_time = current_time + timedelta(hours=i+1)
+                future_hour = future_time.hour
+                future_minute = future_time.minute
+                
+                # Major consumption: 9 AM - 5 PM (peak activity)
+                if 9 <= future_hour < 17:
+                    # Full consumption during school hours
+                    adjusted_predictions.append(pred)
+                # Low consumption: 5 PM - 6:30 PM (computer lab only)
+                elif 17 <= future_hour < 18 or (future_hour == 18 and future_minute < 30):
+                    # Reduce to ~30% for computer lab only
+                    adjusted_predictions.append(pred * 0.3)
+                # Zero consumption: After 6:30 PM and before 9 AM
+                else:
+                    # No consumption after 6:30 PM
+                    adjusted_predictions.append(0.0)
+            
             # Calculate confidence (0-1 scale)
             confidence = [
                 max(0.1, min(0.95, 1 - (upper - lower) / (abs(pred) + 0.001)))
-                for pred, lower, upper in zip(predictions, lower_bound, upper_bound)
+                for pred, lower, upper in zip(adjusted_predictions, lower_bound, upper_bound)
             ]
             
             # Ensure reasonable bounds (0-100)
-            predictions = [max(0, min(100, p)) for p in predictions]
+            adjusted_predictions = [max(0, min(100, p)) for p in adjusted_predictions]
             
             # Save model
             save_model(device_id, "forecast", model)
             
             return ForecastResponse(
                 device_id=device_id,
-                forecast=predictions,
+                forecast=adjusted_predictions,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
-                model_type="prophet"
+                timestamp=current_time.isoformat(),
+                model_type="prophet_time_adjusted"
             )
             
         except Exception as prophet_error:
@@ -528,8 +406,6 @@ async def forecast_usage(request: ForecastRequest):
                 model_type="moving_average_fallback"
             )
         
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"Forecast error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Forecast failed: {str(e)}")
@@ -598,8 +474,6 @@ async def detect_anomalies(request: AnomalyRequest):
             timestamp=datetime.now().isoformat()
         )
         
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"Anomaly detection error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Anomaly detection failed: {str(e)}")
@@ -622,10 +496,10 @@ async def clear_device_models(device_id: str):
         model_files = list(MODELS_DIR.glob(f"{device_id}_*.pkl"))
         for f in model_files:
             f.unlink()
-
+        
         if device_id in anomaly_detectors:
             del anomaly_detectors[device_id]
-
+        
         return {
             "device_id": device_id,
             "cleared": len(model_files),
@@ -634,80 +508,8 @@ async def clear_device_models(device_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing models: {str(e)}")
 
-# ===== ADVANCED AI ENDPOINTS =====
-
-@app.post("/anomaly-detection/advanced", response_model=AnomalyResponse)
-async def advanced_anomaly_detection(request: AnomalyDetectionRequest):
-    """Advanced anomaly detection with multiple algorithms"""
-    # Temporarily disabled due to import issues
-    raise HTTPException(status_code=501, detail="Advanced anomaly detection temporarily unavailable")
-
-@app.post("/predictive-maintenance", response_model=MaintenancePrediction)
-async def predictive_maintenance(request: PredictiveMaintenanceRequest):
-    """Predictive maintenance analysis"""
-    # Temporarily disabled due to import issues
-    raise HTTPException(status_code=501, detail="Predictive maintenance temporarily unavailable")
-
-@app.post("/voice/nlp", response_model=VoiceCommandResponse)
-async def process_voice_command(request: VoiceCommandRequest):
-    """Natural language processing for voice commands"""
-    # Temporarily disabled due to import issues
-    raise HTTPException(status_code=501, detail="Voice NLP temporarily unavailable")
-
-@app.post("/ai/conversational-chat", response_model=ConversationalChatResponse)
-async def conversational_chat(request: ConversationalChatRequest):
-    """Handles conversational AI interactions, including commands and chat."""
-    # Temporarily disabled due to import issues
-    raise HTTPException(status_code=501, detail="Conversational AI temporarily unavailable")
-
-@app.post("/ai/update-entities")
-async def update_ai_entities(request: EntityUpdateRequest):
-    """Updates the AI's knowledge of controllable devices and locations."""
-    # Temporarily disabled due to import issues
-    raise HTTPException(status_code=501, detail="AI entity update temporarily unavailable")
-
-
-@app.post("/computer-vision/analyze", response_model=ComputerVisionResponse)
-async def analyze_device_image(
-    device_id: str = Form(...),
-    device_type: str = Form(...),
-    analysis_type: str = Form("status"),
-    file: UploadFile = File(...)
-):
-    """Computer vision analysis for device monitoring"""
-    # Temporarily disabled due to import issues
-    raise HTTPException(status_code=501, detail="Computer vision temporarily unavailable")
-
-# ===== MLFLOW MANAGEMENT ENDPOINTS =====
-
-@app.post("/mlflow/models/register")
-async def register_mlflow_model(model_name: str, run_id: str):
-    """Register model in MLflow Model Registry"""
-    # Temporarily disabled
-    raise HTTPException(status_code=501, detail="MLflow temporarily unavailable")
-
-@app.post("/mlflow/models/stage")
-async def transition_model_stage(model_name: str, version: str, stage: str):
-    """Transition model to different stage"""
-    # Temporarily disabled
-    raise HTTPException(status_code=501, detail="MLflow temporarily unavailable")
-
-@app.get("/mlflow/models/{model_name}")
-async def get_model_info(model_name: str, stage: str = "Production"):
-    """Get model information from registry"""
-    # Temporarily disabled
-    raise HTTPException(status_code=501, detail="MLflow temporarily unavailable")
-
-@app.post("/mlflow/ab-test")
-async def setup_ab_test(request: ABTestRequest):
-    """Set up A/B testing experiment"""
-    # Temporarily disabled
-    raise HTTPException(status_code=501, detail="MLflow temporarily unavailable")
-
-@app.get("/mlflow/experiments")
-async def list_experiments():
-    """List all MLflow experiments"""
-    # Temporarily disabled
-    raise HTTPException(status_code=501, detail="MLflow temporarily unavailable")
-
-# Removed uvicorn.run() from here - use python -m uvicorn ai_ml_service.main:app instead
+if __name__ == "__main__":
+    logger.info("Starting AI/ML Microservice v2.0")
+    logger.info(f"Prophet available: {PROPHET_AVAILABLE}")
+    logger.info(f"Models directory: {MODELS_DIR}")
+    uvicorn.run(app, host="0.0.0.0", port=8002)

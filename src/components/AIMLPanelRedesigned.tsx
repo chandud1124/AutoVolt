@@ -8,8 +8,9 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { 
   Brain, TrendingUp, AlertTriangle, Wrench, Layers, Activity, 
   RefreshCw, Download, Sparkles, Loader2, CheckCircle, XCircle,
-  BarChart3, Clock, DollarSign, Shield, Target, Zap, MapPin, Wifi, WifiOff
+  BarChart3, Clock, DollarSign, Shield, Target, Zap, MapPin, Wifi, WifiOff, Calendar
 } from 'lucide-react';
+import SmartSchedulerTab from './SmartSchedulerTab';
 import { 
   LineChart, Line, AreaChart, Area, BarChart, Bar, 
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
@@ -169,7 +170,7 @@ const AIMLPanel: React.FC = () => {
       setLoading(true);
       // Generate sample historical data for forecasting
       const history = Array.from({ length: 24 }, () => Math.random() * 100 + 50);
-      const response = await aiMlAPI.forecast(currentDevice.id, history, 5);
+      const response = await aiMlAPI.forecast(currentDevice.id, history, 24);
       setForecastData(response.data);
     } catch (error) {
       console.error('Forecast fetch failed:', error);
@@ -254,6 +255,7 @@ const AIMLPanel: React.FC = () => {
     { value: 'anomaly', label: 'Anomalies', icon: AlertTriangle },
     { value: 'maintenance', label: 'Maintenance', icon: Wrench },
     { value: 'workflow', label: 'Automation', icon: Layers },
+    { value: 'scheduler', label: 'Smart Scheduler', icon: Calendar },
     { value: 'voice', label: 'Voice', icon: Brain },
   ];
 
@@ -461,6 +463,12 @@ const AIMLPanel: React.FC = () => {
                     onRefresh={fetchScheduleData}
                     device={currentDevice}
                   />
+                ) : value === 'scheduler' ? (
+                  <SmartSchedulerTab 
+                    devices={devices}
+                    currentDevice={currentDevice}
+                    setDevice={setDevice}
+                  />
                 ) : (
                   <div className='text-center py-12'>
                     <EmptyState 
@@ -597,11 +605,17 @@ const ForecastTab: React.FC<{ data: any; loading: boolean; onRefresh: () => void
     );
   }
 
-  const forecastData = data.forecast?.map((value: number, index: number) => ({
-    period: `+${index + 1}h`,
-    forecast: Math.round(value * 100) / 100,
-    confidence: data.confidence?.[index] ? Math.round(data.confidence[index] * 100) : 80
-  })) || [];
+  const forecastData = data.forecast?.map((value: number, index: number) => {
+    const futureTime = new Date();
+    futureTime.setHours(futureTime.getHours() + index + 1);
+    const hours = futureTime.getHours().toString().padStart(2, '0');
+    const minutes = futureTime.getMinutes().toString().padStart(2, '0');
+    return {
+      period: `${hours}:${minutes}`,
+      forecast: Math.round(value * 100) / 100,
+      confidence: data.confidence?.[index] ? Math.round(data.confidence[index] * 100) : 80
+    };
+  }) || [];
 
   return (
     <div className='space-y-6'>
@@ -623,14 +637,14 @@ const ForecastTab: React.FC<{ data: any; loading: boolean; onRefresh: () => void
 
         <Card className='border-border/50 shadow-lg'>
           <CardHeader className='pb-3'>
-            <CardTitle className='text-sm font-medium text-muted-foreground'>5-Hour Average</CardTitle>
+            <CardTitle className='text-sm font-medium text-muted-foreground'>24-Hour Total</CardTitle>
           </CardHeader>
           <CardContent>
             <div className='text-2xl font-bold text-blue-600'>
-              {forecastData.length > 0 ? Math.round(forecastData.reduce((sum: number, item: any) => sum + item.forecast, 0) / forecastData.length * 100) / 100 : 0} kWh
+              {forecastData.length > 0 ? Math.round(forecastData.reduce((sum: number, item: any) => sum + item.forecast, 0) * 100) / 100 : 0} kWh
             </div>
             <p className='text-xs text-muted-foreground mt-1'>
-              Predicted consumption
+              Total predicted consumption
             </p>
           </CardContent>
         </Card>
@@ -664,7 +678,7 @@ const ForecastTab: React.FC<{ data: any; loading: boolean; onRefresh: () => void
             </Button>
           </CardTitle>
           <CardDescription>
-            AI-powered predictions for {device?.name} energy usage over the next 5 hours
+            24-hour AI-powered predictions for {device?.name} (Zero consumption after 6:30 PM)
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -672,8 +686,14 @@ const ForecastTab: React.FC<{ data: any; loading: boolean; onRefresh: () => void
             <ResponsiveContainer width='100%' height='100%'>
               <LineChart data={forecastData}>
                 <CartesianGrid strokeDasharray='3 3' stroke='hsl(var(--border))' opacity={0.3} />
-                <XAxis dataKey='period' />
-                <YAxis />
+                <XAxis 
+                  dataKey='period' 
+                  angle={-45}
+                  textAnchor='end'
+                  height={80}
+                  interval={2}
+                />
+                <YAxis label={{ value: 'kWh', angle: -90, position: 'insideLeft' }} />
                 <Tooltip 
                   contentStyle={{
                     backgroundColor: 'hsl(var(--card))',

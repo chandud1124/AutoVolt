@@ -194,3 +194,16 @@ playwright-report/
 
 # Docker
 .dockerignore
+
+# Python virtual environments
+venv/
+ai_ml_service/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+ENV/
+env.bak/
+venv.bak/

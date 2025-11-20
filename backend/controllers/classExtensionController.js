@@ -1,5 +1,7 @@
 const ClassExtensionRequest = require('../models/ClassExtensionRequest');
 const ActivityLog = require('../models/ActivityLog');
+const Notification = require('../models/Notification');
+const User = require('../models/User');
 const { logger } = require('../middleware/logger');
 
 // Create a new class extension request
@@ -71,6 +73,34 @@ const createExtensionRequest = async (req, res) => {
       location: 'class_extension',
       details: `Requested ${extensionDuration} minute extension for ${subject || 'class'} in ${roomNumber}`
     });
+
+    // Send notifications to approvers (deans and admins)
+    try {
+      const approvers = await User.find({
+        $or: [
+          { role: 'dean' },
+          { role: 'admin' },
+          { role: 'super-admin' }
+        ],
+        isActive: true,
+        isApproved: true
+      }).select('_id');
+
+      for (const approver of approvers) {
+        await Notification.createExtensionNotification({
+          recipient: approver._id,
+          extensionId: extensionRequest._id,
+          requestType: 'submitted',
+          teacherName: req.user.name,
+          roomNumber: extensionRequest.roomNumber,
+          extensionDuration: extensionRequest.extensionDuration,
+          reason
+        });
+      }
+    } catch (notificationError) {
+      logger.error('Error sending extension request notifications:', notificationError);
+      // Don't fail the request if notifications fail
+    }
 
     // Populate the response
     await extensionRequest.populate('requestedBy', 'name email role department');

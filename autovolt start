@@ -1,0 +1,354 @@
+# AutoVolt - Complete Startup Guide
+# ==================================
+# IoT Smart Classroom Automation System
+# Last Updated: November 17, 2025
+
+# This guide provides step-by-step instructions to start all AutoVolt components
+# Choose the startup method that best fits your needs
+
+# ==============================================================================
+# QUICK START OPTIONS
+# ==============================================================================
+
+# Option 1: FULL DOCKER STARTUP (Recommended for Production)
+# ------------------------------------------------------------------------------
+# Start all services with Docker Compose (includes monitoring, AI/ML, etc.)
+docker-compose up -d
+
+# Check if all services are running
+docker-compose ps
+
+# View logs for all services
+docker-compose logs -f
+
+# Stop all services
+docker-compose down
+
+# ------------------------------------------------------------------------------
+# Option 2: DEVELOPMENT STARTUP (Recommended for Development)
+# ------------------------------------------------------------------------------
+# Terminal 1: Start Backend API Server
+cd backend
+npm run dev
+
+# Terminal 2: Start Frontend React App
+npm run dev
+
+# Terminal 3: Start AI/ML Service (Optional)
+cd ai_ml_service
+python main.py
+
+# ------------------------------------------------------------------------------
+# Option 3: MONITORING STACK ONLY
+# ------------------------------------------------------------------------------
+# Start Prometheus + Grafana monitoring stack
+docker-compose -f docker-compose.monitoring.yml up -d
+
+# Or use the Windows setup script (run as Administrator)
+.\setup-grafana.ps1
+
+# ==============================================================================
+# DETAILED STEP-BY-STEP STARTUP GUIDE
+# ==============================================================================
+
+# STEP 1: PREREQUISITES CHECK
+# ------------------------------------------------------------------------------
+# Ensure you have these installed:
+# - Node.js 18+ (https://nodejs.org/)
+# - Python 3.8+ (https://python.org/)
+# - MongoDB (local or Atlas)
+# - Git (https://git-scm.com/)
+# - Docker & Docker Compose (optional but recommended)
+
+# Check versions
+node --version
+npm --version
+python --version
+docker --version
+docker-compose --version
+
+# STEP 2: ENVIRONMENT SETUP
+# ------------------------------------------------------------------------------
+# Copy environment files
+cp .env.example .env
+cp backend/.env.example backend/.env
+
+# Edit backend/.env with your settings:
+# - MONGODB_URI: Your MongoDB connection string
+# - JWT_SECRET: Secure random string (32+ characters)
+# - TELEGRAM_BOT_TOKEN: Your Telegram bot token (optional)
+# - EMAIL settings: For notifications (optional)
+
+# STEP 3: DEPENDENCY INSTALLATION
+# ------------------------------------------------------------------------------
+# Install frontend dependencies
+npm install
+
+# Install backend dependencies
+cd backend
+npm install
+cd ..
+
+# Install AI/ML Python dependencies (optional)
+cd ai_ml_service
+pip install -r requirements.txt
+cd ..
+
+# STEP 4: DATABASE SETUP
+# ------------------------------------------------------------------------------
+# Option A: Start local MongoDB with Docker
+docker run -d --name mongodb -p 27017:27017 mongo:6.0
+
+# Option B: Use MongoDB Atlas (cloud)
+# Update MONGODB_URI in backend/.env with your Atlas connection string
+
+# STEP 5: START SERVICES BY COMPONENT
+# ==============================================================================
+
+# 5A. BACKEND API SERVER (Required)
+# ------------------------------------------------------------------------------
+cd backend
+
+# Development mode (with auto-restart)
+npm run dev
+
+# Production mode
+npm start
+
+# Check if running: http://localhost:3001/health
+# API Documentation: http://localhost:3001/api-docs
+
+# 5B. FRONTEND REACT APPLICATION (Required)
+# ------------------------------------------------------------------------------
+# From project root directory
+npm run dev
+
+# Access URLs:
+# - Local: http://localhost:5173
+# - Network: http://172.16.3.171:5173 (adjust IP as needed)
+
+# 5C. AI/ML SERVICE (Optional - for Analytics & Forecasting)
+# ------------------------------------------------------------------------------
+cd ai_ml_service
+
+# Start the FastAPI service
+python main.py
+
+# Or use the startup script
+python app.py
+
+# Access URLs:
+# - API: http://localhost:8002
+# - Health: http://localhost:8002/health
+# - Docs: http://localhost:8002/docs
+
+# 5D. MQTT BROKER (Required for ESP32 devices)
+# ------------------------------------------------------------------------------
+# Option A: Using Docker
+docker run -d --name mosquitto -p 1883:1883 -p 9001:9001 eclipse-mosquitto:2.0
+
+# Option B: Using Aedes (built into backend)
+# MQTT is automatically started with the backend server
+
+# 5E. MONITORING STACK (Optional - for System Monitoring)
+# ------------------------------------------------------------------------------
+# Start Prometheus + Grafana with Docker
+docker-compose -f docker-compose.monitoring.yml up -d
+
+# Or start individual services:
+# Prometheus only
+docker run -d -p 9090:9090 -v ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
+
+# Grafana only
+docker run -d -p 3000:3000 --name grafana grafana/grafana
+
+# Access URLs:
+# - Grafana: http://localhost:3000 (admin/admin)
+# - Prometheus: http://localhost:9090
+
+# 5F. REDIS CACHE (Optional - for Performance)
+# ------------------------------------------------------------------------------
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+# STEP 6: ESP32 DEVICE SETUP (Optional)
+# ------------------------------------------------------------------------------
+# 1. Flash ESP32 firmware using PlatformIO
+# cd esp32
+# pio run -e esp32dev
+# pio run -e esp32dev -t upload
+
+# 2. Configure WiFi credentials in firmware
+# 3. Register device in web interface
+# 4. Test device connectivity
+
+# STEP 7: TELEGRAM BOT SETUP (Optional)
+# ------------------------------------------------------------------------------
+# 1. Create bot with @BotFather on Telegram
+# 2. Get bot token and update backend/.env
+# 3. Register admin user: /register admin@college.edu
+# 4. Available commands: /devices, /status, /on, /off
+
+# ==============================================================================
+# PRODUCTION DEPLOYMENT
+# ==============================================================================
+
+# 1. Build production images
+docker-compose -f docker-compose.prod.yml build
+
+# 2. Start production stack
+docker-compose -f docker-compose.prod.yml up -d
+
+# 3. Setup reverse proxy (nginx)
+docker run -d -p 80:80 -v ./nginx.conf:/etc/nginx/nginx.conf nginx
+
+# 4. Configure SSL with Let's Encrypt (optional)
+# Use certbot for automatic SSL certificates
+
+# ==============================================================================
+# TROUBLESHOOTING & HEALTH CHECKS
+# ==============================================================================
+
+# Check if services are running
+netstat -ano | findstr :3001  # Backend
+netstat -ano | findstr :5173  # Frontend
+netstat -ano | findstr :8002  # AI/ML
+netstat -ano | findstr :1883  # MQTT
+netstat -ano | findstr :3000  # Grafana
+netstat -ano | findstr :9090  # Prometheus
+
+# Health check endpoints
+curl http://localhost:3001/health      # Backend health
+curl http://localhost:8002/health      # AI/ML health
+curl http://localhost:3001/metrics     # Prometheus metrics
+
+# View logs
+docker-compose logs -f backend
+docker-compose logs -f frontend
+docker-compose logs -f ai-ml-service
+
+# Database connection test
+mongosh --eval "db.adminCommand('ping')"
+
+# Restart services
+docker-compose restart backend
+docker-compose restart frontend
+
+# ==============================================================================
+# DEVELOPMENT WORKFLOW
+# ==============================================================================
+
+# 1. Start development environment
+npm run dev          # Frontend (Terminal 1)
+cd backend && npm run dev  # Backend (Terminal 2)
+
+# 2. Run tests
+npm test             # Frontend tests
+cd backend && npm test  # Backend tests
+
+# 3. Build for production
+npm run build        # Frontend build
+cd backend && npm run build  # Backend build
+
+# 4. Code quality checks
+npm run lint         # ESLint
+npm run format       # Prettier
+
+# ==============================================================================
+# USEFUL SCRIPTS & COMMANDS
+# ==============================================================================
+
+# Windows PowerShell Scripts (run as Administrator)
+.\setup-windows.ps1           # Initial project setup
+.\setup-grafana.ps1           # Grafana + Prometheus setup
+.\start-aiml-insights.ps1     # AI/ML service quick start
+
+# Docker Management
+docker-compose up -d              # Start all services
+docker-compose down               # Stop all services
+docker-compose logs -f            # View logs
+docker-compose ps                 # Show running containers
+docker system prune -a            # Clean up unused containers
+
+# Database Management
+mongosh                          # MongoDB shell
+mongosh --eval "show dbs"        # List databases
+mongosh autovolt --eval "db.devices.count()"  # Count devices
+
+# Network Testing
+ping 172.16.3.171               # Test network connectivity
+curl http://localhost:3001/api/devices  # Test API
+
+# ==============================================================================
+# ACCESS URLs SUMMARY
+# ==============================================================================
+
+# Main Application
+# - Frontend: http://localhost:5173 or http://172.16.3.171:5173
+# - Backend API: http://localhost:3001
+# - Health Check: http://localhost:3001/health
+
+# Monitoring & Analytics
+# - Grafana: http://localhost:3000 (admin/admin)
+# - Prometheus: http://localhost:9090
+# - AI/ML API: http://localhost:8002
+# - AI/ML Docs: http://localhost:8002/docs
+
+# Development
+# - API Documentation: http://localhost:3001/api-docs
+# - MQTT Broker: localhost:1883
+# - Redis: localhost:6379
+# - MongoDB: localhost:27017
+
+# ==============================================================================
+# COMMON ISSUES & SOLUTIONS
+# ==============================================================================
+
+# Issue: Port already in use
+# Solution: Find and kill process using the port
+netstat -ano | findstr :3001
+taskkill /PID <PID> /F
+
+# Issue: MongoDB connection failed
+# Solution: Check MongoDB is running and connection string is correct
+docker ps | grep mongo
+# Or: mongosh --eval "db.adminCommand('ping')"
+
+# Issue: ESP32 not connecting
+# Solution: Check WiFi credentials, MQTT broker, and device registration
+
+# Issue: Frontend not loading
+# Solution: Check backend is running and API_BASE_URL is correct in .env
+
+# Issue: AI/ML service errors
+# Solution: Check Python dependencies and port 8002 availability
+pip install -r ai_ml_service/requirements.txt
+
+# ==============================================================================
+# SUPPORT & DOCUMENTATION
+# ==============================================================================
+
+# Documentation Files:
+# - README.md                 # Main project documentation
+# - DEPLOYMENT_CHECKLIST.md   # Production deployment guide
+# - ESP32_FIRMWARE_UPDATE_GUIDE.md  # Device setup
+# - GRAFANA_SETUP.md         # Monitoring setup
+# - API_DOCUMENTATION.md     # API reference
+
+# Support:
+# - GitHub Issues: Report bugs and request features
+# - Documentation: Check /docs directory
+# - Community: Join our Discord/Slack channel
+
+# ==============================================================================
+# FINAL NOTES
+# ==============================================================================
+
+# 1. Always check the logs when services fail to start
+# 2. Use the health check endpoints to verify service status
+# 3. For production deployment, use docker-compose.prod.yml
+# 4. Keep your .env files secure and never commit them to version control
+# 5. Regularly backup your MongoDB database
+# 6. Monitor system resources, especially during high usage periods
+
+# Happy coding with AutoVolt! 🚀</content>
+<parameter name="filePath">c:\Users\IOT\Desktop\new-autovolt\autovolt start

@@ -1,6 +1,6 @@
 
 
-import { Zap, Calendar, Users as UsersIcon, Settings as SettingsIcon, Shield, UserCheck, User, Ticket, FileText, BarChart3, Brain, Monitor, Link, LayoutDashboard, Bell, LogOut } from "lucide-react";
+import { Zap, Calendar, Users as UsersIcon, Settings as SettingsIcon, Shield, UserCheck, User, Ticket, FileText, BarChart3, Brain, Monitor, Link, LayoutDashboard, Bell, LogOut, Clock } from "lucide-react";
 import NotFound from "./pages/NotFound";
 
 export const navItems = [
@@ -33,6 +33,11 @@ export const navItems = [
     title: "Schedule",
     to: "/dashboard/schedule",
     icon: <Calendar className="h-4 w-4" />,
+  },
+  {
+    title: "Extension Requests",
+    to: "/dashboard/extensions",
+    icon: <Clock className="h-4 w-4" />,
   },
 
   // ===== ANALYTICS & MONITORING =====

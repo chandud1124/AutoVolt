@@ -109,11 +109,9 @@ router.post('/test-alert', auth, authorize('admin', 'super-admin'), async (req, 
 router.get('/bot-info', auth, authorize('admin', 'super-admin'), async (req, res) => {
   try {
     const botInfo = await telegramService.getBotInfo();
-    res.json({
-      success: true,
-      bot: botInfo
-    });
+    res.json(botInfo);
   } catch (error) {
+    console.error('Error getting bot info:', error);
     res.status(500).json({ error: 'Failed to get bot info' });
   }
 });
@@ -202,6 +200,88 @@ router.get('/users', auth, authorize('admin', 'super-admin'), async (req, res) =
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch Telegram users' });
+  }
+});
+
+// Register a user for Telegram notifications (admin only)
+router.post('/users/:userId/register', auth, authorize('admin', 'super-admin'), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { telegramUsername } = req.body;
+
+    // Find the user
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user already has a Telegram registration
+    let telegramUser = await TelegramUser.findOne({ user: userId });
+
+    if (telegramUser) {
+      // Update existing registration
+      telegramUser.isActive = true;
+      if (telegramUsername) {
+        telegramUser.telegramUsername = telegramUsername;
+      }
+      await telegramUser.save();
+    } else {
+      // Create new registration (without telegramId/chatId - user needs to register via bot)
+      telegramUser = new TelegramUser({
+        user: userId,
+        telegramUsername: telegramUsername || null,
+        isActive: true,
+        isVerified: false, // User still needs to verify via bot
+        registrationToken: null, // No token needed for admin registration
+        tokenExpires: null
+      });
+      await telegramUser.save();
+    }
+
+    // Update user's notification preferences
+    await User.findByIdAndUpdate(userId, {
+      'notificationPreferences.telegram': true
+    });
+
+    res.json({
+      success: true,
+      message: 'User registered for Telegram notifications',
+      user: telegramUser
+    });
+  } catch (error) {
+    console.error('Error registering user for Telegram:', error);
+    res.status(500).json({ error: 'Failed to register user' });
+  }
+});
+
+// Unregister a user from Telegram notifications (admin only)
+router.delete('/users/:userId/unregister', auth, authorize('admin', 'super-admin'), async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Find and deactivate the Telegram user
+    const telegramUser = await TelegramUser.findOneAndUpdate(
+      { user: userId },
+      { isActive: false },
+      { new: true }
+    );
+
+    if (!telegramUser) {
+      return res.status(404).json({ error: 'Telegram user not found' });
+    }
+
+    // Update user's notification preferences
+    await User.findByIdAndUpdate(userId, {
+      'notificationPreferences.telegram': false
+    });
+
+    res.json({
+      success: true,
+      message: 'User unregistered from Telegram notifications'
+    });
+  } catch (error) {
+    console.error('Error unregistering user from Telegram:', error);
+    res.status(500).json({ error: 'Failed to unregister user' });
   }
 });
 

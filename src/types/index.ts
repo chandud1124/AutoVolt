@@ -341,3 +341,63 @@ export * from './user';
 export * from './analytics';
 export * from './activityLog';
 export * from './common';
+
+export interface ClassExtensionRequest {
+  id: string;
+  scheduleId: string;
+  scheduleName?: string;
+  requestedBy: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    department?: string;
+  };
+  originalEndTime: string;
+  requestedEndTime: string;
+  reason: string;
+  additionalNotes?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  submittedAt: Date;
+  processedAt?: Date;
+  processedBy?: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+  };
+  comments: Array<{
+    id: string;
+    comment: string;
+    commentedBy: {
+      id: string;
+      name: string;
+      email: string;
+      role: string;
+    };
+    commentedAt: Date;
+  }>;
+  classroom?: string;
+  department?: string;
+}
+
+export interface ExtensionRequestData {
+  scheduleId: string;
+  requestedEndTime: string;
+  reason: string;
+  additionalNotes?: string;
+}
+
+export interface ExtensionProcessData {
+  action: 'approve' | 'reject';
+  comments?: string;
+}
+
+export interface ExtensionStats {
+  total: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  approvalRate: number;
+  averageProcessingTime: number; // in hours
+}

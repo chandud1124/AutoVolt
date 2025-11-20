@@ -281,6 +281,11 @@ export const authAPI = {
     newPassword?: string;
   }) => api.put('/auth/profile', data),
 
+  changePassword: (data: {
+    currentPassword: string;
+    newPassword: string;
+  }) => api.put('/auth/change-password', data),
+
   deleteAccount: () => api.delete('/auth/profile'),
 
   forgotPassword: (email: string) =>
@@ -304,6 +309,10 @@ export const authAPI = {
     api.put(`/auth/notifications/${notificationId}/read`),
 
   getUnreadNotificationCount: () => api.get('/auth/notifications/unread-count'),
+
+  verifyEmail: (token: string) => api.get(`/auth/verify-email/${token}`),
+
+  resendVerification: (email: string) => api.post('/auth/resend-verification', { email }),
 };
 
 export const scheduleAPI = {
@@ -707,7 +716,66 @@ export const energyAPI = {
   hourlyBreakdown: (date: string, classroom?: string, deviceId?: string) =>
     api.get('/analytics/energy-breakdown/hourly', { params: { date, classroom, deviceId } }),
   monthlyBreakdown: (year: number, month: number, classroom?: string, deviceId?: string) =>
-    api.get('/analytics/energy-breakdown/monthly', { params: { year, month, classroom, deviceId } }),
+    api.get('/analytics/energy-breakdown/monthly', { params: { year, month, classroom } }),
   yearlyBreakdown: (year: number, classroom?: string) =>
     api.get('/analytics/energy-breakdown/yearly', { params: { year, classroom } })
+};
+
+export const telegramAPI = {
+  // Get bot information and configuration
+  getBotInfo: () => api.get('/telegram/bot-info'),
+
+  // Register webhook for Telegram bot
+  registerWebhook: (webhookUrl?: string) => api.post('/telegram/webhook', { webhookUrl }),
+
+  // Get registered Telegram users
+  getUsers: () => api.get('/telegram/users').then(res => res.data.users),
+
+  // Unregister a user from Telegram notifications
+  unregisterUser: (userId: string) =>
+    api.delete(`/telegram/users/${userId}/unregister`),
+
+  // Get Telegram bot statistics
+  getStats: () => api.get('/telegram/stats').then(res => res.data.stats),
+
+  // Send test alert to verify bot functionality
+  sendTestAlert: (message?: string) =>
+    api.post('/telegram/test-alert', { message }),
+};
+
+export const classExtensionAPI = {
+  // Create a new extension request
+  createRequest: (data: {
+    scheduleId: string;
+    requestedEndTime: string;
+    reason: string;
+    additionalNotes?: string;
+  }) => api.post('/class-extensions', data),
+
+  // Get my extension requests
+  getMyRequests: () => api.get('/class-extensions/my'),
+
+  // Get pending requests for approval
+  getPendingApprovals: () => api.get('/class-extensions/pending'),
+
+  // Get all extension requests (admin only)
+  getAllRequests: (params?: {
+    page?: number;
+    limit?: number;
+    status?: string;
+    search?: string;
+  }) => api.get('/class-extensions', { params }),
+
+  // Process an extension request (approve/reject)
+  processRequest: (requestId: string, data: {
+    action: 'approve' | 'reject';
+    comments?: string;
+  }) => api.patch(`/class-extensions/${requestId}/process`, data),
+
+  // Add comment to extension request
+  addComment: (requestId: string, comment: string) =>
+    api.post(`/class-extensions/${requestId}/comments`, { comment }),
+
+  // Get extension statistics
+  getStats: () => api.get('/class-extensions/stats/summary'),
 };

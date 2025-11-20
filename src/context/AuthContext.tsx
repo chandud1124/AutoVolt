@@ -19,7 +19,12 @@ interface AuthContextType {
     currentPassword?: string;
     newPassword?: string;
     delete?: boolean;
-  }) => Promise<any>;
+  }) => Promise<unknown>;
+
+  changePassword: (data: {
+    currentPassword: string;
+    newPassword: string;
+  }) => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
 
@@ -270,6 +275,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   };
 
+  const changePassword = async (data: {
+    currentPassword: string;
+    newPassword: string;
+  }) => {
+    try {
+      console.log('[AuthContext] Calling changePassword API...');
+      const response = await authAPI.changePassword(data);
+      console.log('[AuthContext] ✅ Password change API response:', response.data);
+    } catch (error) {
+      console.error('[AuthContext] ❌ Password change API error:', error);
+      throw error;
+    }
+  };
+
   const value: AuthContextType = {
     user,
     loading,
@@ -277,6 +296,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     login,
     logout,
     updateProfile,
+    changePassword,
     refreshProfile: checkAuthStatus
   };
 

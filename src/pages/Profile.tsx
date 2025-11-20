@@ -22,7 +22,7 @@ import { useNavigate } from 'react-router-dom';
 
 export const Profile = () => {
   const navigate = useNavigate();
-  const { user, updateProfile } = useAuth();
+  const { user, updateProfile, changePassword } = useAuth();
   const [loading, setLoading] = useState({
     profile: false,
     password: false,
@@ -91,6 +91,8 @@ export const Profile = () => {
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    console.log('[Profile] Password change initiated');
+    
     if (!formData.currentPassword) {
       toast.error("Current password is required");
       return;
@@ -104,12 +106,14 @@ export const Profile = () => {
       return;
     }
 
+    console.log('[Profile] Validation passed, sending request...');
     setLoading(prev => ({ ...prev, password: true }));
     try {
-      await updateProfile({
+      await changePassword({
         currentPassword: formData.currentPassword,
         newPassword: formData.newPassword,
       });
+      console.log('[Profile] ✅ Password changed successfully');
       toast.success('Password updated successfully');
       setFormData(prev => ({
         ...prev,
@@ -118,6 +122,7 @@ export const Profile = () => {
         confirmPassword: ''
       }));
     } catch (error: unknown) {
+      console.error('[Profile] ❌ Password change failed:', error);
       let message = 'Failed to update password';
       if (error && typeof error === 'object' && 'response' in error && error.response && typeof error.response === 'object' && 'data' in error.response && error.response.data && typeof error.response.data === 'object' && 'message' in error.response.data && typeof error.response.data.message === 'string') {
         message = error.response.data.message;

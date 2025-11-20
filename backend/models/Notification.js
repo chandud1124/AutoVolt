@@ -397,12 +397,12 @@ notificationSchema.statics.createUserRegistrationNotification = async function (
             {
                 label: 'Review Registration',
                 action: 'review_user',
-                url: `/admin/users/${userId}`
+                url: `/dashboard/users?userId=${userId}`
             },
             {
                 label: 'Approve User',
                 action: 'approve_user',
-                url: `/admin/users/${userId}/approve`
+                url: `/dashboard/users?userId=${userId}&action=approve`
             }
         ]
     });

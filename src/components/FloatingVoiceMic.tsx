@@ -1,5 +1,6 @@
 ﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Mic, MicOff, Loader2, Settings, History, AlertCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useVoiceSession } from '@/hooks/useVoiceSession';
@@ -56,6 +57,7 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
   const [showHistory, setShowHistory] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [statusText, setStatusText] = useState('');
 
   // Voice data
   const [currentTranscript, setCurrentTranscript] = useState('');
@@ -79,6 +81,32 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
   // Refs
   const recognitionRef = useRef<any>(null);
   const recognitionListenerRef = useRef<any>(null);
+  const awaitingConfirmationRef = useRef(false);
+  const pendingCommandRef = useRef('');
+  const statusTextTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto-clear status text after 8 seconds
+  useEffect(() => {
+    if (statusText) {
+      // Clear any existing timeout
+      if (statusTextTimeoutRef.current) {
+        clearTimeout(statusTextTimeoutRef.current);
+      }
+      
+      // Set new timeout to clear status text
+      statusTextTimeoutRef.current = setTimeout(() => {
+        setStatusText('');
+        statusTextTimeoutRef.current = null;
+      }, 8000);
+    }
+
+    // Cleanup on unmount
+    return () => {
+      if (statusTextTimeoutRef.current) {
+        clearTimeout(statusTextTimeoutRef.current);
+      }
+    };
+  }, [statusText]);
 
   // Check platform capabilities
   useEffect(() => {
@@ -88,7 +116,15 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
           // For Android, prefer web APIs since Capacitor plugins may not be fully implemented
           const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
           setIsSpeechSupported(!!SpeechRecognitionAPI);
-          setIsTTSSupported(!!window.speechSynthesis);
+
+          // For Android, Web Speech Synthesis is available in WebView by default
+          const hasSpeechSynthesis = typeof window !== 'undefined' && 'speechSynthesis' in window;
+          setIsTTSSupported(hasSpeechSynthesis);
+          if (hasSpeechSynthesis) {
+            console.log('[TTS] Web Speech Synthesis available on Android');
+          } else {
+            console.warn('[TTS] Web Speech Synthesis not available on this Android WebView');
+          }
 
           // Try native plugins but don't fail if they're not available
           try {
@@ -116,6 +152,29 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
 
     checkCapabilities();
   }, []);
+
+  // Initialize voice session when user is authenticated
+  useEffect(() => {
+    const initVoiceSession = async () => {
+      // Only initialize if user is authenticated but voice session is not
+      if (userAuthenticated && !voiceSessionAuthenticated && !sessionLoading && !voiceToken) {
+        console.log('[Voice] User authenticated, initializing voice session...');
+        const session = await createVoiceSession();
+        if (session) {
+          console.log('[Voice] Voice session initialized successfully');
+          toast({
+            title: '🎤 Voice Control Ready',
+            description: 'You can now use voice commands',
+            duration: 3000,
+          });
+        } else {
+          console.warn('[Voice] Failed to initialize voice session');
+        }
+      }
+    };
+
+    initVoiceSession();
+  }, [userAuthenticated, voiceSessionAuthenticated, sessionLoading, voiceToken, createVoiceSession, toast]);
 
   // Initialize speech recognition
   const initRecognition = useCallback(async () => {
@@ -379,23 +438,23 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
     if (!voiceSettings.ttsEnabled) return;
 
     try {
-      if (Capacitor.isNativePlatform()) {
-        // For Android, prefer web speech synthesis since native TTS plugin may not be implemented
-        if (window.speechSynthesis) {
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.lang = voiceSettings.language;
-          utterance.rate = 1.0;
-          utterance.pitch = 1.0;
-          utterance.volume = 1.0;
-          window.speechSynthesis.speak(utterance);
-        } else {
-          console.warn('Web speech synthesis not available on Android');
-        }
-      } else if (window.speechSynthesis) {
+      if (window.speechSynthesis) {
+        // Use web speech synthesis for all platforms (Android WebView and desktop browsers)
         // Web platform - use browser TTS
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = voiceSettings.language;
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        
+        // Handle synthesis errors
+        utterance.onerror = (event) => {
+          console.warn('Speech synthesis error:', event.error);
+        };
+        
         window.speechSynthesis.speak(utterance);
+      } else {
+        console.log('Speech synthesis not available, skipping TTS for:', text);
       }
     } catch (error) {
       console.error('TTS failed:', error);
@@ -425,6 +484,8 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
   const startConfirmationListening = useCallback(async (command: string) => {
     setAwaitingConfirmation(true);
     setPendingCommand(command);
+    awaitingConfirmationRef.current = true;
+    pendingCommandRef.current = command;
 
     // Force stop any existing recognition before starting confirmation
     if (recognitionRef.current) {
@@ -437,13 +498,14 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
     setIsRecognitionActive(false);
     setIsListening(false);
 
-    await speakText(`Are you sure you want to ${command}? Say yes to confirm or no to cancel.`);
-
+    // Show prominent confirmation dialog
     toast({
-      title: '🔄 Confirmation Required',
-      description: `Say "yes" to confirm or "no" to cancel: "${command}"`,
-      duration: 10000,
+      title: '⚠️ CONFIRMATION REQUIRED',
+      description: `\n🎤 Command: "${command}"\n\n✅ Say "YES" or "CONFIRM" to proceed\n❌ Say "NO" or "CANCEL" to abort\n\nWaiting for your response...`,
+      duration: 15000,
     });
+
+    await speakText(`Are you sure you want to ${command}? Say yes to confirm or no to cancel.`);
 
     // Wait longer to ensure recognition has fully stopped
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -452,26 +514,48 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
   }, [speakText, toast, startListening]);
 
   // Process confirmation response
-  const processConfirmation = useCallback(async (response: string) => {
+  const processConfirmation = useCallback((response: string, processCommandFn: (cmd: string, retried: boolean, confirmed: boolean) => Promise<void>) => {
     const confirmation = response.toLowerCase().trim();
+    const commandToExecute = pendingCommandRef.current;
 
     if (confirmation === 'yes' || confirmation === 'confirm' || confirmation === 'okay' || confirmation === 'sure') {
       setAwaitingConfirmation(false);
-      await speakText('Confirmed. Executing command.');
-      await processCommand(pendingCommand, false, true);
+      awaitingConfirmationRef.current = false;
       setPendingCommand('');
+      pendingCommandRef.current = '';
+      
+      toast({
+        title: '✅ Confirmed',
+        description: `Executing command: "${commandToExecute}"`,
+        duration: 3000,
+      });
+      
+      speakText('Confirmed. Executing command.').then(() => {
+        processCommandFn(commandToExecute, false, true);
+      });
     } else if (confirmation === 'no' || confirmation === 'cancel' || confirmation === 'stop') {
       setAwaitingConfirmation(false);
-      await speakText('Command cancelled.');
+      awaitingConfirmationRef.current = false;
+      setPendingCommand('');
+      pendingCommandRef.current = '';
+      
       toast({
         title: '❌ Command Cancelled',
-        description: 'Voice command was cancelled',
+        description: `Cancelled: "${commandToExecute}"`,
+        variant: 'destructive',
+        duration: 5000,
       });
-      setPendingCommand('');
+      
+      speakText('Command cancelled.');
     } else {
-      await speakText('Please say yes or no clearly.');
+      toast({
+        title: '❓ Unclear Response',
+        description: 'Please say "YES" or "NO" clearly',
+        duration: 5000,
+      });
+      speakText('Please say yes or no clearly.');
     }
-  }, [pendingCommand, speakText, toast]);
+  }, [speakText, toast, setPendingCommand, setAwaitingConfirmation]);
 
   // Ensure voice session (fallback to JWT if voice session fails)
   const ensureVoiceSession = useCallback(async () => {
@@ -496,8 +580,10 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
 
   // Main command processing
   const processCommand = useCallback(async (command: string, retried = false, isConfirmed = false) => {
-    if (awaitingConfirmation) {
-      await processConfirmation(command);
+    // Use ref to check current confirmation state
+    if (awaitingConfirmationRef.current) {
+      console.log('[Voice] Processing confirmation response:', command);
+      processConfirmation(command, processCommand);
       return;
     }
 
@@ -542,7 +628,10 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
         requestData.voiceToken = activeToken;
       }
 
+      console.log('[Voice Command] Processing:', { command, hasToken: !!activeToken });
       const response = await voiceAssistantAPI.processVoiceCommand(requestData);
+      console.log('[Voice Command] Full Response:', response);
+      console.log('[Voice Command] Response Data:', response.data);
 
       const commandResult: VoiceCommand = {
         id: Date.now().toString(),
@@ -554,25 +643,91 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
 
       setCommandHistory(prev => [commandResult, ...prev.slice(0, 49)]);
 
+      // Show more detailed feedback based on response
+      const hasOperations = response.data.operations && response.data.operations.length > 0;
+      const operationDetails = hasOperations 
+        ? response.data.operations.map((op: any) => 
+            `${op.device?.name || 'Device'}: ${op.switch?.name || 'Switch'} → ${op.success ? '✓' : '✗'}`
+          ).join(', ')
+        : '';
+
       if (response.data.success) {
+        const deviceCount = response.data.operations?.length || 0;
+        const successCount = response.data.operations?.filter((op: any) => op.success).length || 0;
+        const failCount = deviceCount - successCount;
+        
+        let statusSummary = '';
+        if (deviceCount > 0) {
+          statusSummary = `\n\n📊 Results: ${successCount} succeeded`;
+          if (failCount > 0) {
+            statusSummary += `, ${failCount} failed`;
+          }
+        }
+        
+        const detailedMessage = operationDetails 
+          ? `${response.data.message || 'Command executed'}${statusSummary}\n\n${operationDetails}`
+          : `${response.data.message || 'Voice command successful'}${statusSummary}`;
+
+        // Always show visual feedback
+        console.log('[Voice UI] Showing success toast:', detailedMessage);
         toast({
-          title: '✅ Command Executed',
-          description: response.data.message || 'Voice command successful',
+          title: '✅ Command Executed Successfully',
+          description: detailedMessage,
+          duration: deviceCount > 5 ? 8000 : 6000,
+          variant: 'default',
         });
+
+        // Update status text for visual feedback
+        setStatusText('✅ ' + (response.data.message || 'Command executed'));
 
         await speakText(response.data.message || 'Command executed successfully');
         onCommandExecuted?.(response.data);
       } else {
-        toast({
-          title: '❌ Command Failed',
-          description: response.data.message || 'Could not execute command',
-          variant: 'destructive'
-        });
+        // Check if it's a confirmation request from backend
+        const isConfirmationRequired = response.data.message?.includes('confirm') || 
+                                       response.data.message?.includes('Say yes') ||
+                                       response.data.actionType === 'confirmation_required';
+        
+        if (isConfirmationRequired) {
+          // Show highly visible confirmation request
+          console.log('[Voice UI] Showing confirmation request:', response.data.message);
+          toast({
+            title: '⚠️ CONFIRMATION REQUIRED',
+            description: `${response.data.message}\n\n✅ Say "YES" or "CONFIRM" to proceed\n❌ Say "NO" or "CANCEL" to cancel`,
+            duration: 15000,
+            variant: 'default',
+          });
+          
+          // Update status text for visual feedback
+          setStatusText('⚠️ ' + response.data.message);
+          
+          await speakText(response.data.message);
+        } else {
+          const errorContext = response.data.context?.reason ? ` (${response.data.context.reason})` : '';
+          const errorMessage = (response.data.message || 'Could not execute command') + errorContext;
+          
+          // Always show visual error feedback
+          console.log('[Voice UI] Showing error toast:', errorMessage);
+          toast({
+            title: '❌ Command Failed',
+            description: errorMessage,
+            variant: 'destructive',
+            duration: 7000,
+          });
 
-        await speakText('Sorry, I could not execute that command. ' + (response.data.message || 'Please try again.'));
+          // Update status text for visual feedback
+          setStatusText('❌ ' + errorMessage);
+
+          await speakText('Sorry, I could not execute that command. ' + (response.data.message || 'Please try again.'));
+        }
       }
     } catch (error: any) {
       console.error('Voice command error:', error);
+      console.error('Error details:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message
+      });
 
       const commandResult: VoiceCommand = {
         id: Date.now().toString(),
@@ -585,17 +740,60 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
       setCommandHistory(prev => [commandResult, ...prev.slice(0, 49)]);
 
       let errorMessage = 'Failed to process command';
+      let errorTitle = '❌ Command Failed';
 
       if (error.response?.status === 401) {
-        errorMessage = 'Please login first to use voice commands';
+        // Check if it's a voice session error
+        const isVoiceSessionError = error.response?.data?.message?.includes('voice session') || 
+                                    error.response?.data?.code === 'INVALID_VOICE_SESSION';
+        
+        if (isVoiceSessionError && !retried) {
+          errorMessage = 'Voice session expired. Refreshing...';
+          errorTitle = '🔄 Refreshing Session';
+          
+          // Show immediate feedback
+          toast({
+            title: errorTitle,
+            description: errorMessage,
+            duration: 2000,
+          });
+          
+          // Try to create a new voice session and retry the command
+          console.log('[Voice] Attempting to refresh voice session...');
+          const newSession = await createVoiceSession();
+          if (newSession) {
+            console.log('[Voice] Voice session refreshed successfully, retrying command...');
+            // Retry the command with the new session (set retried=true to prevent infinite loop)
+            setIsProcessing(true);
+            return processVoiceCommand(command, true);
+          } else {
+            errorMessage = 'Failed to refresh voice session. Please try again.';
+            errorTitle = '❌ Session Refresh Failed';
+          }
+        } else if (retried) {
+          errorMessage = 'Voice session refresh failed. Please logout and login again.';
+          errorTitle = '❌ Session Error';
+        } else {
+          errorMessage = 'Please login first to use voice commands';
+          errorTitle = '🔒 Authentication Required';
+        }
+      } else if (error.response?.status === 403) {
+        errorMessage = error.response?.data?.message || 'You don\'t have permission to execute this command';
+        errorTitle = '🔒 Permission Denied';
+      } else if (error.response?.status === 404) {
+        errorMessage = 'Voice assistant service not found. Please contact support.';
+        errorTitle = '❌ Service Error';
       } else if (error.response?.data?.message) {
         errorMessage = error.response.data.message;
+      } else if (error.message) {
+        errorMessage = `Network error: ${error.message}`;
       }
 
       toast({
-        title: '❌ Command Failed',
+        title: errorTitle,
         description: errorMessage,
-        variant: 'destructive'
+        variant: 'destructive',
+        duration: 7000,
       });
 
       await speakText('Sorry, there was an error processing your command. ' + errorMessage);
@@ -604,7 +802,8 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
     }
   }, [
     awaitingConfirmation, processConfirmation, stopListening, requiresConfirmation,
-    startConfirmationListening, ensureVoiceSession, toast, speakText, onCommandExecuted
+    startConfirmationListening, ensureVoiceSession, toast, speakText, onCommandExecuted,
+    createVoiceSession, voiceToken
   ]);
 
   // Handle mic button click
@@ -703,29 +902,49 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
           )}
 
           {/* Main mic button */}
-          <Button
-            onClick={handleMicClick}
-            disabled={isProcessing}
-            size={voiceSettings.buttonSize === 'large' ? 'lg' : voiceSettings.buttonSize === 'small' ? 'sm' : 'default'}
-            className={cn(
-              "rounded-full shadow-lg transition-all duration-200",
-              isListening && "bg-red-500 hover:bg-red-600 animate-pulse",
-              isProcessing && "bg-yellow-500 hover:bg-yellow-600",
-              awaitingConfirmation && "bg-orange-500 hover:bg-orange-600",
-              voiceSettings.theme === 'dark' && "bg-gray-800 hover:bg-gray-700 text-white",
-              voiceSettings.theme === 'colorful' && "bg-white hover:bg-gray-50 text-gray-900 border-2 border-gray-200"
-            )}
-          >
-            {isProcessing ? (
-              <Loader2 className="h-5 w-5 animate-spin" />
-            ) : isListening ? (
-              <MicOff className="h-5 w-5" />
-            ) : awaitingConfirmation ? (
-              <AlertCircle className="h-5 w-5" />
-            ) : (
-              <Mic className="h-5 w-5" />
-            )}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                onClick={handleMicClick}
+                disabled={isProcessing}
+                size={voiceSettings.buttonSize === 'large' ? 'lg' : voiceSettings.buttonSize === 'small' ? 'sm' : 'default'}
+                className={cn(
+                  "rounded-full shadow-lg transition-all duration-200",
+                  isListening && "bg-red-500 hover:bg-red-600 animate-pulse",
+                  isProcessing && "bg-yellow-500 hover:bg-yellow-600",
+                  awaitingConfirmation && "bg-orange-500 hover:bg-orange-600",
+                  voiceSettings.theme === 'dark' && "bg-gray-800 hover:bg-gray-700 text-white",
+                  voiceSettings.theme === 'colorful' && "bg-white hover:bg-gray-50 text-gray-900 border-2 border-2-gray-200"
+                )}
+              >
+                {isProcessing ? (
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                ) : isListening ? (
+                  <MicOff className="h-5 w-5" />
+                ) : awaitingConfirmation ? (
+                  <AlertCircle className="h-5 w-5" />
+                ) : (
+                  <Mic className="h-5 w-5" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="max-w-xs">
+              <div className="space-y-1">
+                <p className="font-semibold">
+                  {isListening ? '🎤 Listening...' : isProcessing ? '⏳ Processing...' : awaitingConfirmation ? '❓ Confirm Command' : '🎙️ Voice Control'}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {isListening ? 'Speak your command now. Click to stop.' : 
+                   isProcessing ? 'Processing your voice command...' : 
+                   awaitingConfirmation ? 'Say "yes" to confirm or "no" to cancel' : 
+                   'Click to start voice commands. Try: "Turn on lights" or "Show devices"'}
+                </p>
+                {statusText && (
+                  <p className="text-xs font-medium pt-1 border-t">{statusText}</p>
+                )}
+              </div>
+            </TooltipContent>
+          </Tooltip>
 
           {/* Status indicator */}
           {(isListening || isProcessing || awaitingConfirmation) && (
@@ -757,6 +976,13 @@ const FloatingVoiceMic: React.FC<FloatingVoiceMicProps> = ({ onCommandExecuted }
           </Button>
         </div>
       </div>
+
+      {/* Status Text Display - Always visible when there's a status */}
+      {statusText && (
+        <div className="absolute top-full mt-2 left-1/2 transform -translate-x-1/2 bg-background border rounded-lg shadow-lg p-3 max-w-xs z-50 animate-in slide-in-from-top-2">
+          <p className="text-sm font-medium text-center whitespace-pre-wrap">{statusText}</p>
+        </div>
+      )}
 
       {/* Transcript Display */}
       {showTranscript && (
