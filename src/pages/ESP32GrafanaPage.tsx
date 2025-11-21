@@ -10,7 +10,7 @@ const ESP32GrafanaPage: React.FC = () => {
   const iframeRef = React.useRef<HTMLIFrameElement>(null);
 
   // ESP32 Public Dashboard URL
-  const esp32DashboardUrl = 'http://localhost:3000/public-dashboards/d62e6d4e83d8400085cb7b24db51c879';
+  const esp32DashboardUrl = 'http://localhost:3000/public-dashboards/9b62b9fa2f834bd7acb0e4b8abbe9e12';
 
   const handleRefresh = () => {
     setIsLoading(true);

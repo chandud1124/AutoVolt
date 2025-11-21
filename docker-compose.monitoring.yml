@@ -21,9 +21,14 @@ services:
       - GF_SECURITY_ALLOW_EMBEDDING=true
       - GF_SECURITY_COOKIE_SAMESITE=lax
       - GF_SECURITY_COOKIE_SECURE=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_FEATURE_TOGGLES_ENABLE=publicDashboards
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/iot-classroom-overview.json
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana-provisioning:/etc/grafana/provisioning
+      - ./monitoring/dashboards:/var/lib/grafana/dashboards
     ports:
       - "3000:3000"
     restart: unless-stopped

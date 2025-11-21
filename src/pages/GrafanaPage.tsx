@@ -8,7 +8,7 @@ const GrafanaPage: React.FC = () => {
   const navigate = useNavigate();
 
   // ESP32 Public Dashboard URL (updated to provisioned dashboard UID)
-  const esp32DashboardUrl = 'http://localhost:3000/public-dashboards/d62e6d4e83d8400085cb7b24db51c879';
+  const esp32DashboardUrl = 'http://localhost:3000/public-dashboards/9b62b9fa2f834bd7acb0e4b8abbe9e12';
 
   const goBack = () => {
     navigate(-1); // Go back to previous page

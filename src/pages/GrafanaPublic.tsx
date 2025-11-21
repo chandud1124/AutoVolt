@@ -7,7 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 const GrafanaPublic: React.FC = () => {
   // Use the regular dashboard URL (requires authentication)
   const grafanaUrl = 'http://localhost:3000/d/iot-classroom-dashboard';
-  const publicUrl = 'http://localhost:3000/public-dashboards/iot-classroom-dashboard';
+  const publicUrl = 'http://localhost:3000/public-dashboards/9b62b9fa2f834bd7acb0e4b8abbe9e12';
   const iframeRef = React.useRef<HTMLIFrameElement>(null);
   const [showError, setShowError] = React.useState(false);
   const [isPublic, setIsPublic] = React.useState(false);
