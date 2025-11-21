@@ -90,6 +90,8 @@ struct Command {
   bool valid;
   unsigned long timestamp;
   uint8_t source; // CMD_SRC_*
+  String userId;  // User who initiated the command
+  String userName; // User's display name
 };
 Command commandQueue[MAX_COMMAND_QUEUE];
 int commandQueueHead = 0;
@@ -347,6 +349,10 @@ void initSwitches() {
 // COMMAND QUEUE
 // ========================================
 void queueSwitchCommand(int gpio, bool state, uint8_t source) {
+  queueSwitchCommand(gpio, state, source, "", "");
+}
+
+void queueSwitchCommand(int gpio, bool state, uint8_t source, String userId, String userName) {
   // Validate GPIO is actually configured for a switch
   bool validGpio = false;
   for (int i = 0; i < NUM_SWITCHES; i++) {
@@ -406,9 +412,9 @@ void queueSwitchCommand(int gpio, bool state, uint8_t source) {
   }
 
   // Append new command
-  commandQueue[commandQueueTail] = {gpio, state, true, millis(), source};
+  commandQueue[commandQueueTail] = {gpio, state, true, millis(), source, userId, userName};
   commandQueueTail = nextTail;
-  Serial.printf("[CMD] Queued: GPIO %d -> %s\n", gpio, state ? "ON" : "OFF");
+  Serial.printf("[CMD] Queued: GPIO %d -> %s (user: %s)\n", gpio, state ? "ON" : "OFF", userName.length() > 0 ? userName.c_str() : "system");
 }
 
 void processCommandQueue() {
@@ -503,7 +509,7 @@ void processCommandQueue() {
       // record physical toggle time to enforce cooldown
       lastToggleAt[si] = nowApply;
       // publish event so backend can mark active logs with source
-      DynamicJsonDocument ev(192);
+      DynamicJsonDocument ev(256);
       ev["mac"] = WiFi.macAddress();
       ev["secret"] = DEVICE_SECRET;
       ev["type"] = "switch_event";
@@ -511,11 +517,13 @@ void processCommandQueue() {
       ev["state"] = cmd.state;
       ev["source"] = cmdSourceName(cmd.source);
       ev["timestamp"] = millis();
-      char evbuf[192];
+      if (cmd.userId.length() > 0) ev["userId"] = cmd.userId;
+      if (cmd.userName.length() > 0) ev["userName"] = cmd.userName;
+      char evbuf[256];
       size_t evn = serializeJson(ev, evbuf);
       if (evn > 0 && mqttClient.connected()) {
         mqttClient.publish(TELEMETRY_TOPIC, STATUS_QOS, false, evbuf, evn);
-        Serial.printf("[TELEM] Published switch_event gpio=%d source=%s\n", cmd.gpio, cmdSourceName(cmd.source));
+        Serial.printf("[TELEM] Published switch_event gpio=%d source=%s user=%s\n", cmd.gpio, cmdSourceName(cmd.source), cmd.userName.length() > 0 ? cmd.userName.c_str() : "system");
       }
     }
 
@@ -1157,9 +1165,14 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
         if (doc.containsKey("state")) state = (bool)doc["state"];
         else if (doc.containsKey("value")) state = (bool)doc["value"];
 
+        String userId = "";
+        String userName = "";
+        if (doc.containsKey("userId")) userId = String((const char*)doc["userId"]);
+        if (doc.containsKey("userName")) userName = String((const char*)doc["userName"]);
+
         if (gpio >= 0) {
-          Serial.printf("[MQTT] SWITCH accepted -> gpio=%d state=%d\n", gpio, state ? 1 : 0);
-          queueSwitchCommand(gpio, state, CMD_SRC_BACKEND);
+          Serial.printf("[MQTT] SWITCH accepted -> gpio=%d state=%d user=%s\n", gpio, state ? 1 : 0, userName.length() > 0 ? userName.c_str() : "system");
+          queueSwitchCommand(gpio, state, CMD_SRC_BACKEND, userId, userName);
           processCommandQueue();
         } else {
           Serial.println("[MQTT] SWITCH accepted but no gpio/index/relayGpio found in payload");
@@ -1347,8 +1360,28 @@ void updateConnectionStatus() {
 }
 
 // ========================================
-// SYSTEM HEALTH
+// STATUS LED FUNCTIONS
 // ========================================
+void blinkStatus() {
+  static unsigned long lastBlink = 0;
+  static bool ledState = false;
+  unsigned long now = millis();
+  int pattern = 0;
+
+  if (connState == WIFI_DISCONNECTED) {
+    // Fast blink (250ms on, 250ms off)
+    pattern = (now % 500) < 250;
+  } else if (connState == WIFI_ONLY) {
+    // Slow blink (1s on, 1s off)
+    pattern = (now % 2000) < 1000;
+  } else if (connState == BACKEND_CONNECTED) {
+    // LED constantly ON
+    pattern = 1;
+  }
+
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, pattern ? HIGH : LOW);
+}
 void checkSystemHealth() {
   static unsigned long lastCheck = 0;
   if (millis() - lastCheck < 10000) return;
@@ -1448,11 +1481,7 @@ void setup() {
   }
   
   // Initialize watchdog (15 seconds)
-  esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = WDT_TIMEOUT_MS,
-    .trigger_panic = true
-  };
-  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_init(WDT_TIMEOUT_MS / 1000, true);  // timeout in seconds
   esp_task_wdt_add(NULL);
   Serial.printf("[WDT] Watchdog initialized: %d seconds\n", WDT_TIMEOUT_MS / 1000);
   

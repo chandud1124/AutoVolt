@@ -1,4 +1,4 @@
 me-no-dev/AsyncTCP
-me-no-dev/AsyncMqttClient
-knolleary/PubSubClient
 bblanchon/ArduinoJson
+https://github.com/marvinroger/async-mqtt-client.git
+knolleary/PubSubClient
