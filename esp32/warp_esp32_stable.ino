@@ -3,8 +3,6 @@
  * 
  * Features:
  * - 6 relay control with manual switches (momentary/maintained)
- * - Dual PIR/Microwave motion sensor support
- * - Per-switch PIR configuration (usePir, dontAutoOff)
  * - MQTT communication with backend
  * - Persistent state in NVS
  * - Watchdog protection with frequent resets
@@ -22,12 +20,10 @@
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
-#include <time.h>
-#include <stdlib.h>
 #include "config.h"
 #include "blink_status.h"
 
-// When many switches are toggled at once (motion or bulk config), staggering
+// When many switches are toggled at once (bulk config), staggering
 // the physical relay transitions reduces inrush current and audible/electrical
 // disturbance. If RELAY_SWITCH_STAGGER_MS is defined in config.h it will be
 // used, otherwise fall back to this sensible default.
@@ -77,8 +73,6 @@ struct SwitchState {
   bool lastManualActive;
   bool defaultState;
   int gpio;  // For compatibility
-  bool usePir;  // Per-switch PIR response
-  bool dontAutoOff;  // Prevent auto-off
 };
 SwitchState switchesLocal[NUM_SWITCHES];
 bool pinSetup[NUM_SWITCHES] = {false};
@@ -97,48 +91,12 @@ Command commandQueue[MAX_COMMAND_QUEUE];
 int commandQueueHead = 0;
 int commandQueueTail = 0;
 
-// Motion sensor configuration
-struct MotionSensorConfig {
-  bool enabled;
-  String type;            // "hc-sr501", "rcwl-0516", or "both"
-  int primaryGpio;        // PIR (GPIO 34)
-  int secondaryGpio;      // Microwave (GPIO 35)
-  int autoOffDelay;       // seconds
-  String detectionLogic;  // "and", "or", or "weighted"
-  bool dualMode;          // true when using both
-  bool scheduleEnabled;   // enable time-based gating
-  String activeStartTime; // HH:MM (local)
-  String activeEndTime;   // HH:MM (local)
-  int activeDays[7];      // 0/1 for Sunday..Saturday
-  String timezone;        // POSIX TZ (e.g., "IST-5:30", "UTC")
-};
-MotionSensorConfig motionConfig = {
-  false, "hc-sr501", 34, 35, 30, "and", false,
-  false, "08:30", "17:30", {0,1,1,1,1,1,0}, "UTC"
-};
-
-// Motion sensor state
-bool motionDetected = false;
-bool lastMotionState = false;
-unsigned long lastMotionTime = 0;
-unsigned long motionStartTime = 0;
-bool autoOffActive = false;
-int affectedSwitches[NUM_SWITCHES] = {-1, -1, -1, -1, -1, -1};
-
 // Timing variables
 unsigned long lastStateSend = 0;
 bool pendingState = false;
 // Boot time to avoid spurious triggers right after boot
 unsigned long bootTime = 0;
 
-// --- Non-blocking debounce runtime state ---
-unsigned long lastMotionSampleAt = 0;
-uint8_t primaryConsecutive = 0;
-uint8_t secondaryConsecutive = 0;
-bool primaryStableState = false;
-bool secondaryStableState = false;
-bool lastPrimaryRaw = false;
-bool lastSecondaryRaw = false;
 // Track last successful heartbeat publish (ms)
 unsigned long lastSuccessfulHeartbeatPublish = 0;
 bool reportedOffline = false;
@@ -148,9 +106,6 @@ uint16_t lastHeartbeatMsgId = 0;
 // Track last physical toggle per switch to enforce RELAY_MIN_TOGGLE_MS
 unsigned long lastToggleAt[NUM_SWITCHES] = {0};
 
-// Additional debouncing variables for enhanced stability
-unsigned long primaryLastChangeTime = 0;
-unsigned long secondaryLastChangeTime = 0;
 unsigned long lastPressTime[NUM_SWITCHES] = {0};
 uint8_t debounceCounter[NUM_SWITCHES] = {0};
 
@@ -159,11 +114,9 @@ uint8_t debounceCounter[NUM_SWITCHES] = {0};
 // ========================================
 // Command sources
 #define CMD_SRC_BACKEND 0
-#define CMD_SRC_MOTION  1
 #define CMD_SRC_MANUAL  2
 
 const char* cmdSourceName(uint8_t s) {
-  if (s == CMD_SRC_MOTION) return "motion";
   if (s == CMD_SRC_MANUAL) return "manual";
   return "backend";
 }
@@ -199,11 +152,9 @@ void loadSwitchConfigFromNVS() {
     switchesLocal[i].defaultState = prefs.getBool(("def" + String(i)).c_str(), false);
     switchesLocal[i].state = prefs.getBool(("state" + String(i)).c_str(), false);
     switchesLocal[i].manualMomentary = prefs.getBool(("momentary" + String(i)).c_str(), true);
-    switchesLocal[i].usePir = prefs.getBool(("usePir" + String(i)).c_str(), false);
-    switchesLocal[i].dontAutoOff = prefs.getBool(("dontAutoOff" + String(i)).c_str(), false);
   }
   prefs.end();
-  Serial.println("[NVS] Loaded switch config with PIR settings");
+  Serial.println("[NVS] Loaded switch config");
 }
 
 void saveSwitchConfigToNVS() {
@@ -214,89 +165,8 @@ void saveSwitchConfigToNVS() {
     prefs.putBool(("def" + String(i)).c_str(), switchesLocal[i].defaultState);
     prefs.putBool(("state" + String(i)).c_str(), switchesLocal[i].state);
     prefs.putBool(("momentary" + String(i)).c_str(), switchesLocal[i].manualMomentary);
-    prefs.putBool(("usePir" + String(i)).c_str(), switchesLocal[i].usePir);
-    prefs.putBool(("dontAutoOff" + String(i)).c_str(), switchesLocal[i].dontAutoOff);
   }
   prefs.end();
-}
-
-// ========================================
-// TIMEZONE / SCHEDULE HELPERS
-// ========================================
-void applyTimezone(const String &tz) {
-  static String appliedTZ = "";
-  if (!tz.length()) return;
-  if (appliedTZ == tz) return;
-  setenv("TZ", tz.c_str(), 1);
-  tzset();
-  appliedTZ = tz;
-  Serial.printf("[TIME] Timezone set to %s\n", tz.c_str());
-}
-
-void ensureDefaultActiveDays() {
-  bool any = false;
-  for (int d = 0; d < 7; d++) { if (motionConfig.activeDays[d]) { any = true; break; } }
-  if (!any) {
-    int def[7] = {0,1,1,1,1,1,0};
-    for (int d = 0; d < 7; d++) motionConfig.activeDays[d] = def[d];
-    Serial.println("[SCHED] Active days defaulted to weekdays");
-  }
-}
-
-bool isMotionDetectionAllowed() {
-  if (!motionConfig.enabled) {
-    Serial.println("[SCHED] Motion disabled");
-    return false;
-  }
-  if (!motionConfig.scheduleEnabled) {
-    Serial.println("[SCHED] Schedule disabled - motion always allowed");
-    return true;
-  }
-
-  applyTimezone(motionConfig.timezone);
-  ensureDefaultActiveDays();
-
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    // If time not yet synced, allow motion (fail-open)
-    Serial.println("[SCHED] ⚠️ Time NOT synced - allowing motion (fail-open)");
-    return true;
-  }
-  
-  // Log current time for debugging
-  char timebuf[64];
-  strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S (%A)", &timeinfo);
-  Serial.printf("[SCHED] Current time: %s, TZ: %s\n", timebuf, motionConfig.timezone.c_str());
-  
-  int wday = timeinfo.tm_wday; // 0=Sunday
-  if (wday < 0 || wday > 6) return true;
-  
-  if (motionConfig.activeDays[wday] == 0) {
-    Serial.printf("[SCHED] ❌ Day check FAILED - Today (wday=%d) is NOT active\n", wday);
-    return false;
-  }
-  Serial.printf("[SCHED] ✓ Day check passed - wday=%d is active\n", wday);
-
-  int sh=0, sm=0, eh=0, em=0;
-  if (sscanf(motionConfig.activeStartTime.c_str(), "%d:%d", &sh, &sm) != 2) return true;
-  if (sscanf(motionConfig.activeEndTime.c_str(), "%d:%d", &eh, &em) != 2) return true;
-  int cur = timeinfo.tm_hour*60 + timeinfo.tm_min;
-  int start = sh*60 + sm;
-  int end = eh*60 + em;
-  
-  bool inWindow;
-  if (start <= end) {
-    inWindow = (cur >= start && cur < end);
-  } else {
-    inWindow = (cur >= start || cur < end); // spans midnight
-  }
-  
-  Serial.printf("[SCHED] Time check: %02d:%02d (cur=%d) vs window %s-%s (start=%d, end=%d) -> %s\n",
-    timeinfo.tm_hour, timeinfo.tm_min, cur,
-    motionConfig.activeStartTime.c_str(), motionConfig.activeEndTime.c_str(),
-    start, end, inWindow ? "✓ ALLOWED" : "❌ BLOCKED");
-  
-  return inWindow;
 }
 
 void initSwitches() {
@@ -313,8 +183,6 @@ void initSwitches() {
     switchesLocal[i].stableManualLevel = -1;
     switchesLocal[i].lastManualActive = false;
     switchesLocal[i].defaultState = false;
-    switchesLocal[i].usePir = false;
-    switchesLocal[i].dontAutoOff = false;
   }
   loadSwitchConfigFromNVS();
   
@@ -329,10 +197,9 @@ void initSwitches() {
     }
     
     // Log initial states for debugging
-    Serial.printf("[INIT] Switch %d: GPIO %d, state=%s, momentary=%s, usePir=%s\n",
+    Serial.printf("[INIT] Switch %d: GPIO %d, state=%s, momentary=%s\n",
       i, switchesLocal[i].relayGpio, switchesLocal[i].state ? "ON" : "OFF",
-      switchesLocal[i].manualMomentary ? "YES" : "NO",
-      switchesLocal[i].usePir ? "YES" : "NO");
+      switchesLocal[i].manualMomentary ? "YES" : "NO");
   }
   
   // Apply loaded states to relays
@@ -340,6 +207,8 @@ void initSwitches() {
     pinMode(switchesLocal[i].relayGpio, OUTPUT);
     digitalWrite(switchesLocal[i].relayGpio, 
       switchesLocal[i].state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], switchesLocal[i].state ? HIGH : LOW);
     pinSetup[i] = false;
     lastToggleAt[i] = millis();
   }
@@ -363,12 +232,6 @@ void queueSwitchCommand(int gpio, bool state, uint8_t source, String userId, Str
   }
   if (!validGpio) {
     Serial.printf("[CMD] Rejected: GPIO %d not configured for any switch\n", gpio);
-    return;
-  }
-
-  // Prevent queuing if source is motion but motion is disabled
-  if (source == CMD_SRC_MOTION && !motionConfig.enabled) {
-    Serial.printf("[CMD] Rejected: Motion command but motion disabled\n");
     return;
   }
 
@@ -420,7 +283,7 @@ void queueSwitchCommand(int gpio, bool state, uint8_t source, String userId, Str
 void processCommandQueue() {
   // We only process a command every RELAY_SWITCH_STAGGER_MS to avoid
   // switching many relays at the same instant. This reduces electrical
-  // and audible disturbance when bulk updates happen (motion, config, etc.).
+  // and audible disturbance when bulk updates happen.
   static unsigned long lastProcess = 0;
   static unsigned long lastSwitchApply = 0;
   unsigned long now = millis();
@@ -503,6 +366,7 @@ void processCommandQueue() {
       switchesLocal[si].state = cmd.state;
       switchesLocal[si].manualOverride = false;
       digitalWrite(switchesLocal[si].relayGpio, cmd.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+      digitalWrite(ledPins[si], cmd.state ? HIGH : LOW);
       switchesLocal[si].gpio = switchesLocal[si].relayGpio;
       saveSwitchConfigToNVS();
       Serial.printf("[CMD] Applied: GPIO %d -> %s\n", cmd.gpio, cmd.state ? "ON" : "OFF");
@@ -554,10 +418,13 @@ void handleManualSwitches() {
     // require INPUT_PULLDOWN instead of INPUT_PULLUP). Also print initial
     // state when DEBUG_MANUAL is enabled to help diagnose wiring/mode issues.
     if (!pinSetup[i]) {
-      pinMode(sw.manualGpio, MANUAL_USE_INPUT_PULLDOWN ? INPUT_PULLDOWN : INPUT_PULLUP);
+      bool inputOnly = (sw.manualGpio >= 34 && sw.manualGpio <= 39);
+      pinMode(sw.manualGpio, inputOnly ? INPUT : (MANUAL_USE_INPUT_PULLDOWN ? INPUT_PULLDOWN : INPUT_PULLUP));
       pinMode(sw.relayGpio, OUTPUT);
       digitalWrite(sw.relayGpio, 
         sw.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+      pinMode(ledPins[i], OUTPUT);
+      digitalWrite(ledPins[i], sw.state ? HIGH : LOW);
 
       int initialLevel = digitalRead(sw.manualGpio);
       sw.lastManualLevel = initialLevel;
@@ -608,6 +475,7 @@ void handleManualSwitches() {
                 sw.manualOverride = true;
                 digitalWrite(sw.relayGpio, 
                   sw.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+                digitalWrite(ledPins[i], sw.state ? HIGH : LOW);
                 // record manual physical toggle time to enforce cooldown
                 lastToggleAt[i] = millis();
                 lastPressTime[i] = now;
@@ -626,6 +494,7 @@ void handleManualSwitches() {
               sw.manualOverride = true;
               digitalWrite(sw.relayGpio, 
                 sw.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+              digitalWrite(ledPins[i], sw.state ? HIGH : LOW);
               // record manual physical toggle time to enforce cooldown
               lastToggleAt[i] = millis();
               saveSwitchConfigToNVS();
@@ -637,294 +506,6 @@ void handleManualSwitches() {
           sw.lastManualActive = currentActive;
         }
       }
-    }
-  }
-}
-
-// ========================================
-// MOTION SENSOR FUNCTIONS
-// ========================================
-// Non-blocking sampler: called frequently from loop(), updates
-// primaryStableState / secondaryStableState based on consecutive samples.
-void sampleMotionSensorsNonBlocking() {
-  if (!motionConfig.enabled) return;
-  // If schedule gating is active and we are outside the allowed window, clear
-  // any accumulated debounced HIGH state so a stale level doesn't immediately
-  // fire when the window opens again.
-  if (motionConfig.scheduleEnabled && !isMotionDetectionAllowed()) {
-    // Log only once when we first get gated
-    static bool wasGated = false;
-    if (!wasGated) {
-      Serial.println("[MOTION] Schedule gating active - motion sampling BLOCKED");
-      wasGated = true;
-    }
-    primaryStableState = false;
-    secondaryStableState = false;
-    primaryConsecutive = 0;
-    secondaryConsecutive = 0;
-    lastPrimaryRaw = false;
-    lastSecondaryRaw = false;
-    return; // Skip sampling while gated off
-  } else {
-    static bool wasGated = false;
-    if (wasGated) {
-      Serial.println("[MOTION] Schedule gating lifted - motion sampling ACTIVE");
-      wasGated = false;
-    }
-  }
-  unsigned long now = millis();
-  if (now - lastMotionSampleAt < MOTION_SAMPLE_INTERVAL_MS) return;
-  lastMotionSampleAt = now;
-
-  // Primary sensor with improved debouncing
-  bool rawPrimary = digitalRead(motionConfig.primaryGpio) == HIGH;
-  if (rawPrimary != lastPrimaryRaw) {
-    lastPrimaryRaw = rawPrimary;
-    primaryConsecutive = 1;
-    primaryLastChangeTime = now;  // Track change time
-  } else {
-    if (primaryConsecutive < 255) primaryConsecutive++;
-    // Require longer consistency for HIGH state (motion detected)
-    int requiredConsistent = primaryStableState ? MOTION_REQUIRED_CONSISTENT : MOTION_REQUIRED_CONSISTENT * 2;
-    if (primaryConsecutive >= requiredConsistent && primaryStableState != rawPrimary) {
-      // Additional validation: ensure it's not just a brief spike
-      if (rawPrimary && (now - primaryLastChangeTime) > 100) {  // Minimum 100ms for HIGH
-        primaryStableState = rawPrimary;
-        Serial.printf("[MOTION] Primary stable -> %s (consecutive: %d)\n", 
-          primaryStableState ? "HIGH" : "LOW", primaryConsecutive);
-      } else if (!rawPrimary) {
-        primaryStableState = rawPrimary;
-        Serial.printf("[MOTION] Primary stable -> %s (consecutive: %d)\n", 
-          primaryStableState ? "HIGH" : "LOW", primaryConsecutive);
-      }
-    }
-  }
-
-  // Secondary (if enabled) with similar improvements
-  if (motionConfig.dualMode) {
-    bool rawSecondary = digitalRead(motionConfig.secondaryGpio) == HIGH;
-    if (rawSecondary != lastSecondaryRaw) {
-      lastSecondaryRaw = rawSecondary;
-      secondaryConsecutive = 1;
-      secondaryLastChangeTime = now;
-    } else {
-      if (secondaryConsecutive < 255) secondaryConsecutive++;
-      int requiredConsistent = secondaryStableState ? MOTION_REQUIRED_CONSISTENT : MOTION_REQUIRED_CONSISTENT * 2;
-      if (secondaryConsecutive >= requiredConsistent && secondaryStableState != rawSecondary) {
-        if (rawSecondary && (now - secondaryLastChangeTime) > 100) {
-          secondaryStableState = rawSecondary;
-          Serial.printf("[MOTION] Secondary stable -> %s (consecutive: %d)\n", 
-            secondaryStableState ? "HIGH" : "LOW", secondaryConsecutive);
-        } else if (!rawSecondary) {
-          secondaryStableState = rawSecondary;
-          Serial.printf("[MOTION] Secondary stable -> %s (consecutive: %d)\n", 
-            secondaryStableState ? "HIGH" : "LOW", secondaryConsecutive);
-        }
-      }
-    }
-  }
-}
-
-void initMotionSensor() {
-  if (!motionConfig.enabled) {
-    Serial.println("[MOTION] Disabled");
-    return;
-  }
-  // Configure pinMode based on config macro (allow choosing INPUT or INPUT_PULLDOWN)
-  pinMode(motionConfig.primaryGpio, MOTION_USE_INPUT_PULLDOWN ? INPUT_PULLDOWN : INPUT);
-  Serial.printf("[MOTION] Primary sensor (PIR) on GPIO %d (%s)\n", motionConfig.primaryGpio,
-    MOTION_USE_INPUT_PULLDOWN ? "INPUT_PULLDOWN" : "INPUT");
-
-  if (motionConfig.dualMode) {
-    pinMode(motionConfig.secondaryGpio, MOTION_USE_INPUT_PULLDOWN ? INPUT_PULLDOWN : INPUT);
-    Serial.printf("[MOTION] Secondary sensor (Microwave) on GPIO %d (%s)\n", motionConfig.secondaryGpio,
-      MOTION_USE_INPUT_PULLDOWN ? "INPUT_PULLDOWN" : "INPUT");
-  }
-  
-  Serial.printf("[MOTION] Config: type=%s, autoOff=%ds, logic=%s\n",
-    motionConfig.type.c_str(), motionConfig.autoOffDelay, motionConfig.detectionLogic.c_str());
-  Serial.printf("[MOTION] Schedule: %s, time=%s-%s, timezone=%s\n",
-    motionConfig.scheduleEnabled ? "ENABLED" : "DISABLED",
-    motionConfig.activeStartTime.c_str(), motionConfig.activeEndTime.c_str(),
-    motionConfig.timezone.c_str());
-  // Initialize time sync if schedule is used
-  if (motionConfig.scheduleEnabled && WiFi.status() == WL_CONNECTED) {
-    // Configure NTP with GMT offset for India (UTC+5:30 = 19800 seconds)
-    configTime(19800, 0, "pool.ntp.org", "time.nist.gov");
-    Serial.println("[NTP] NTP init requested (GMT+5:30 / IST)");
-  }
-}
-
-bool readMotionSensor() {
-  if (!motionConfig.enabled) return false;
-  if (!isMotionDetectionAllowed()) {
-    return false;
-  }
-  // Return the debounced stable states sampled by sampleMotionSensorsNonBlocking()
-  bool primaryActive = primaryStableState;
-
-  if (motionConfig.dualMode) {
-    bool secondaryActive = secondaryStableState;
-
-    if (motionConfig.detectionLogic == "and") {
-      return primaryActive && secondaryActive;
-    } else if (motionConfig.detectionLogic == "or") {
-      return primaryActive || secondaryActive;
-    } else if (motionConfig.detectionLogic == "weighted") {
-      int confidence = 0;
-      if (primaryActive) confidence += 60;
-      if (secondaryActive) confidence += 40;
-      return confidence >= 70;
-    }
-  }
-
-  return primaryActive;
-}
-
-void publishMotionEvent(bool detected) {
-  if (!motionConfig.enabled || ESP.getFreeHeap() < 1000) return;
-  
-  DynamicJsonDocument doc(512);
-  doc["mac"] = WiFi.macAddress();
-  doc["secret"] = DEVICE_SECRET;
-  doc["type"] = "motion";
-  doc["detected"] = detected;
-  doc["sensorType"] = motionConfig.type;
-  doc["timestamp"] = millis();
-  bool detectionAllowed = isMotionDetectionAllowed();
-  doc["detectionAllowed"] = detectionAllowed;
-  doc["scheduleEnabled"] = motionConfig.scheduleEnabled;
-  if (motionConfig.scheduleEnabled) {
-    doc["timezone"] = motionConfig.timezone;
-    char window[16];
-    snprintf(window, sizeof(window), "%s-%s", motionConfig.activeStartTime.c_str(), motionConfig.activeEndTime.c_str());
-    doc["activeWindow"] = window;
-    uint8_t dayMask = 0; for (int d=0; d<7; d++) if (motionConfig.activeDays[d]) dayMask |= (1<<d);
-    doc["activeDaysMask"] = dayMask; // bit0=Sun .. bit6=Sat
-    struct tm ti; if (getLocalTime(&ti)) {
-      char tbuf[24];
-      strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", &ti);
-      doc["localTime"] = tbuf;
-      doc["wday"] = ti.tm_wday;
-    }
-  }
-  
-  if (motionConfig.dualMode) {
-    doc["pirState"] = digitalRead(motionConfig.primaryGpio) == HIGH;
-    doc["microwaveState"] = digitalRead(motionConfig.secondaryGpio) == HIGH;
-    doc["logic"] = motionConfig.detectionLogic;
-  }
-  
-  char buf[512];
-  size_t n = serializeJson(doc, buf, sizeof(buf));
-  if (n > 0 && mqttClient.connected()) {
-    // Async publish with QoS and payload length
-    mqttClient.publish(TELEMETRY_TOPIC, STATUS_QOS, false, buf, n);
-    Serial.printf("[MOTION] Event published: %s\n", detected ? "DETECTED" : "STOPPED");
-  }
-}
-
-void handleMotionSensor() {
-  // Ignore motion handling entirely until grace period after boot has passed
-  if (millis() - bootTime < MOTION_BOOT_GRACE_MS) return;
-  if (!motionConfig.enabled) return;
-  // Time-based gating: if not allowed, ensure motion-triggered switches are OFF
-  bool detectionAllowed = isMotionDetectionAllowed();
-  if (!detectionAllowed) {
-    if (motionDetected) {
-      motionDetected = false;
-      autoOffActive = false;
-      for (int i = 0; i < NUM_SWITCHES; i++) {
-        if (affectedSwitches[i] == 1 && switchesLocal[i].state && !switchesLocal[i].manualOverride) {
-          queueSwitchCommand(switchesLocal[i].relayGpio, false, CMD_SRC_MOTION);
-          affectedSwitches[i] = -1;
-        }
-      }
-      sendStateUpdate(true);
-    }
-    // Clear debounced states so stale HIGH does not trigger immediately later
-    primaryStableState = false;
-    secondaryStableState = false;
-    primaryConsecutive = 0;
-    secondaryConsecutive = 0;
-    lastPrimaryRaw = false;
-    lastSecondaryRaw = false;
-    return;
-  }
-  
-  unsigned long now = millis();
-  bool currentMotion = readMotionSensor();
-  
-  // Additional validation: require motion to be stable for a minimum time
-  static unsigned long motionStableStart = 0;
-  static bool lastValidatedMotion = false;
-  
-  if (currentMotion != lastValidatedMotion) {
-    if (currentMotion) {
-      motionStableStart = now;
-    }
-    lastValidatedMotion = currentMotion;
-  }
-  
-  // Only consider motion valid if it's been stable for at least 500ms
-  bool validatedMotion = currentMotion && ((now - motionStableStart) > 500);
-  
-  // Use validated motion instead of raw currentMotion
-  
-  // Motion started
-  if (validatedMotion && !motionDetected) {
-    motionDetected = true;
-    motionStartTime = now;
-    lastMotionTime = now;
-    autoOffActive = false;
-    
-    Serial.println("[MOTION] 🔴 DETECTED - Turning ON switches");
-    
-    // Turn ON switches with usePir enabled
-    for (int i = 0; i < NUM_SWITCHES; i++) {
-      if (!switchesLocal[i].usePir || switchesLocal[i].manualOverride) continue;
-      // Queue the switch command rather than toggling immediately. This
-      // avoids toggling many relays at once and lets processCommandQueue
-      // stagger the actual physical actuations.
-      if (!switchesLocal[i].state) {
-        queueSwitchCommand(switchesLocal[i].relayGpio, true, CMD_SRC_MOTION);
-        affectedSwitches[i] = 1; // mark affected immediately for auto-off logic
-        Serial.printf("[MOTION] Queued ON for Switch %d (GPIO %d)\n", i, switchesLocal[i].relayGpio);
-      }
-    }
-    
-    publishMotionEvent(true);
-    sendStateUpdate(true);
-  }
-  
-  // Motion continues
-  if (validatedMotion && motionDetected) {
-    lastMotionTime = now;
-  }
-  
-  // Motion stopped - start auto-off
-  if (!currentMotion && motionDetected && !autoOffActive) {
-    unsigned long timeSinceLastMotion = (now - lastMotionTime) / 1000;
-    
-    if (timeSinceLastMotion >= motionConfig.autoOffDelay) {
-      autoOffActive = true;
-      motionDetected = false;
-      
-      Serial.printf("[MOTION] ⚫ No motion for %ds - Turning OFF switches\n", motionConfig.autoOffDelay);
-      
-      // Turn OFF switches (except dontAutoOff ones)
-      for (int i = 0; i < NUM_SWITCHES; i++) {
-        if (switchesLocal[i].dontAutoOff || switchesLocal[i].manualOverride) continue;
-        // Queue OFF commands so switching is staggered and non-disruptive
-        if (affectedSwitches[i] == 1 && switchesLocal[i].state) {
-          queueSwitchCommand(switchesLocal[i].relayGpio, false, CMD_SRC_MOTION);
-          affectedSwitches[i] = -1;
-          Serial.printf("[MOTION] Queued OFF for Switch %d (GPIO %d)\n", i, switchesLocal[i].relayGpio);
-        }
-      }
-      
-      publishMotionEvent(false);
-      sendStateUpdate(true);
     }
   }
 }
@@ -1010,23 +591,6 @@ void sendHeartbeat() {
   doc["status"] = "heartbeat";
   doc["heap"] = ESP.getFreeHeap();
   doc["uptime"] = millis();
-  bool detectionAllowed = isMotionDetectionAllowed();
-  doc["detectionAllowed"] = detectionAllowed;
-  doc["scheduleEnabled"] = motionConfig.scheduleEnabled;
-  if (motionConfig.scheduleEnabled) {
-    doc["timezone"] = motionConfig.timezone;
-    char window[16];
-    snprintf(window, sizeof(window), "%s-%s", motionConfig.activeStartTime.c_str(), motionConfig.activeEndTime.c_str());
-    doc["activeWindow"] = window;
-    uint8_t dayMask = 0; for (int d=0; d<7; d++) if (motionConfig.activeDays[d]) dayMask |= (1<<d);
-    doc["activeDaysMask"] = dayMask;
-    struct tm ti; if (getLocalTime(&ti)) {
-      char tbuf[24];
-      strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", &ti);
-      doc["localTime"] = tbuf;
-      doc["wday"] = ti.tm_wday;
-    }
-  }
   
   char buf[256];
   size_t n = serializeJson(doc, buf);
@@ -1214,13 +778,6 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
                   if (sw.containsKey("manualGpio")) {
                     manualSwitchPins[i] = (int)sw["manualGpio"];
                   }
-                  // Support per-switch PIR assignment and dontAutoOff
-                  if (sw.containsKey("usePir")) {
-                    switchesLocal[i].usePir = (bool)sw["usePir"];
-                  }
-                  if (sw.containsKey("dontAutoOff")) {
-                    switchesLocal[i].dontAutoOff = (bool)sw["dontAutoOff"];
-                  }
                   if (sw.containsKey("manualMode")) {
                     const char* mode_c = sw["manualMode"] | "";
                     String mode = String(mode_c);
@@ -1234,8 +791,6 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
               prefs.putInt(("relay" + String(i)).c_str(), relayPins[i]);
               prefs.putInt(("manual" + String(i)).c_str(), manualSwitchPins[i]);
               prefs.putBool(("momentary" + String(i)).c_str(), switchesLocal[i].manualMomentary);
-              prefs.putBool(("usePir" + String(i)).c_str(), switchesLocal[i].usePir);
-              prefs.putBool(("dontAutoOff" + String(i)).c_str(), switchesLocal[i].dontAutoOff);
             }
             prefs.end();
 
@@ -1244,54 +799,6 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
           }
         }
 
-        // Motion sensor config (optional nested object)
-        if (doc.containsKey("motionSensor")) {
-          JsonObject ms = doc["motionSensor"];
-          bool wasEnabled = motionConfig.enabled;
-          if (ms.containsKey("enabled")) motionConfig.enabled = (bool)ms["enabled"];
-          if (ms.containsKey("type")) motionConfig.type = String((const char*)ms["type"]);
-          if (ms.containsKey("autoOffDelay")) motionConfig.autoOffDelay = (int)ms["autoOffDelay"];
-          motionConfig.dualMode = (String(motionConfig.type) == "both");
-          if (ms.containsKey("detectionLogic")) motionConfig.detectionLogic = String((const char*)ms["detectionLogic"]);
-          // Schedule options
-          if (ms.containsKey("scheduleEnabled")) motionConfig.scheduleEnabled = (bool)ms["scheduleEnabled"];
-          if (ms.containsKey("activeStartTime")) motionConfig.activeStartTime = String((const char*)ms["activeStartTime"]);
-          if (ms.containsKey("activeEndTime")) motionConfig.activeEndTime = String((const char*)ms["activeEndTime"]);
-          if (ms.containsKey("activeDays")) {
-            // reset then set
-            for (int d=0; d<7; d++) motionConfig.activeDays[d] = 0;
-            JsonArray days = ms["activeDays"].as<JsonArray>();
-            for (JsonVariant v : days) {
-              int dn = v.as<int>();
-              if (dn >= 0 && dn <= 6) motionConfig.activeDays[dn] = 1;
-            }
-          }
-          if (ms.containsKey("timezone")) motionConfig.timezone = String((const char*)ms["timezone"]);
-
-          ensureDefaultActiveDays();
-          applyTimezone(motionConfig.timezone);
-
-          // Persist to NVS (including schedule fields)
-          prefs.begin("motion_cfg", false);
-          prefs.putBool("enabled", motionConfig.enabled);
-          prefs.putString("type", motionConfig.type);
-          prefs.putInt("autoOff", motionConfig.autoOffDelay);
-          prefs.putBool("dualMode", motionConfig.dualMode);
-          prefs.putString("logic", motionConfig.detectionLogic);
-          prefs.putBool("schedEnabled", motionConfig.scheduleEnabled);
-          prefs.putString("startTime", motionConfig.activeStartTime);
-          prefs.putString("endTime", motionConfig.activeEndTime);
-          uint8_t daysByte = 0; for (int d=0; d<7; d++) if (motionConfig.activeDays[d]) daysByte |= (1<<d);
-          prefs.putUChar("activeDays", daysByte);
-          prefs.putString("timezone", motionConfig.timezone);
-          prefs.end();
-
-          if (motionConfig.enabled != wasEnabled || motionConfig.enabled) initMotionSensor();
-          Serial.println("[CONFIG] Motion config updated from server");
-          Serial.printf("[CONFIG] Schedule: %s, %s-%s\n",
-            motionConfig.scheduleEnabled ? "ENABLED" : "DISABLED",
-            motionConfig.activeStartTime.c_str(), motionConfig.activeEndTime.c_str());
-        }
       }
     }
   }
@@ -1329,11 +836,6 @@ void setup_wifi() {
     String mac = WiFi.macAddress();
     mac.replace(":", "");
     sprintf(mqttClientId, "ESP32_%s", mac.c_str());
-    if (motionConfig.scheduleEnabled) {
-      // Configure NTP with GMT offset for India (UTC+5:30 = 19800 seconds)
-      configTime(19800, 0, "pool.ntp.org", "time.nist.gov");
-      Serial.println("[NTP] NTP init requested (GMT+5:30 / IST, WiFi up)");
-    }
   } else {
     Serial.println("\nWiFi failed - offline mode");
     connState = WIFI_DISCONNECTED;
@@ -1362,25 +864,83 @@ void updateConnectionStatus() {
 // ========================================
 // STATUS LED FUNCTIONS
 // ========================================
+void initStatusLED() {
+  // Initialize PWM for LED brightness control
+  // Channel 0, frequency 5000 Hz, resolution 8-bit (0-255)
+  ledcSetup(0, 5000, 8);
+  ledcAttachPin(STATUS_LED_PIN, 0);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+}
+
+void applyRelayLedStates() {
+  for (int i = 0; i < NUM_SWITCHES; i++) {
+    digitalWrite(ledPins[i], switchesLocal[i].state ? HIGH : LOW);
+  }
+}
+
+void setAllRelayLeds(bool on) {
+  for (int i = 0; i < NUM_SWITCHES; i++) {
+    digitalWrite(ledPins[i], on ? HIGH : LOW);
+  }
+}
+
+void welcomeLight() {
+  // Mode 3: Chase Effect - Car unlock style staccato flashes
+  if (!ENABLE_WELCOME_LIGHT) return;
+  
+  unsigned long startTime = millis();
+  int peakBrightness = WELCOME_LIGHT_PEAK;
+  unsigned long duration = WELCOME_LIGHT_DURATION;
+  unsigned long flashOn = WELCOME_LIGHT_FLASH_ON;
+  unsigned long flashOff = WELCOME_LIGHT_FLASH_OFF;
+  unsigned long cyclePeriod = flashOn + flashOff;
+  
+  Serial.println("[LED] Welcome sequence: Mode 3 - Chase Effect (Car Unlock Style)");
+  
+  // Staccato flash sequence - like luxury car unlock lights
+  while (millis() - startTime < duration) {
+    unsigned long elapsed = millis() - startTime;
+    unsigned long phaseTime = elapsed % cyclePeriod;
+    int brightness;
+    
+    if (phaseTime < flashOn) {
+      // Flash ON phase
+      brightness = peakBrightness;
+    } else {
+      // Flash OFF phase (dark pause)
+      brightness = 0;
+    }
+    
+    ledcWrite(0, brightness);
+    setAllRelayLeds(phaseTime < flashOn);
+    delay(5);  // Small delay for responsive animation
+  }
+  
+  // Ensure LED is off after welcome sequence
+  ledcWrite(0, 0);
+  applyRelayLedStates();
+  delay(100);
+  Serial.println("[LED] Welcome sequence complete");
+}
+
 void blinkStatus() {
   static unsigned long lastBlink = 0;
   static bool ledState = false;
   unsigned long now = millis();
-  int pattern = 0;
+  int brightness = 0;
 
   if (connState == WIFI_DISCONNECTED) {
     // Fast blink (250ms on, 250ms off)
-    pattern = (now % 500) < 250;
+    brightness = ((now % 500) < 250) ? LED_BRIGHTNESS : 0;
   } else if (connState == WIFI_ONLY) {
     // Slow blink (1s on, 1s off)
-    pattern = (now % 2000) < 1000;
+    brightness = ((now % 2000) < 1000) ? LED_BRIGHTNESS : 0;
   } else if (connState == BACKEND_CONNECTED) {
-    // LED constantly ON
-    pattern = 1;
+    // LED constantly ON at reduced brightness
+    brightness = LED_BRIGHTNESS;
   }
 
-  pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, pattern ? HIGH : LOW);
+  ledcWrite(0, brightness);
 }
 void checkSystemHealth() {
   static unsigned long lastCheck = 0;
@@ -1399,27 +959,6 @@ void checkSystemHealth() {
     if (switchesLocal[i].state) activeSwitches++;
   }
   Serial.printf("[HEALTH] Active switches: %d/%d\n", activeSwitches, NUM_SWITCHES);
-  
-  // Motion schedule status
-  if (motionConfig.enabled) {
-    struct tm ti;
-    bool timeValid = getLocalTime(&ti);
-    char tbuf[24] = "NOT_SYNCED";
-    if (timeValid) {
-      strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &ti);
-    }
-    Serial.printf("[HEALTH] Motion: %s, Schedule: %s, Time: %s\n",
-      motionConfig.enabled ? "ENABLED" : "DISABLED",
-      motionConfig.scheduleEnabled ? "ENABLED" : "DISABLED",
-      tbuf);
-    if (motionConfig.scheduleEnabled) {
-      Serial.printf("[HEALTH] Window: %s-%s, TZ: %s, Allowed: %s\n",
-        motionConfig.activeStartTime.c_str(),
-        motionConfig.activeEndTime.c_str(),
-        motionConfig.timezone.c_str(),
-        isMotionDetectionAllowed() ? "YES" : "NO");
-    }
-  }
   
   // Check for unexpected activations
   logUnexpectedActivations();
@@ -1440,20 +979,12 @@ void logUnexpectedActivations() {
         shouldBeOn = true;
       }
       
-      // Check motion (if enabled and switch uses PIR)
-      if (motionConfig.enabled && switchesLocal[i].usePir && motionDetected) {
-        shouldBeOn = true;
-      }
-      
       // Check backend commands (recent commands in queue)
       // ... check command queue for recent backend commands
       
       if (!shouldBeOn) {
         Serial.printf("[ALERT] Switch %d (GPIO %d) is ON but no valid reason found!\n", i, switchesLocal[i].relayGpio);
         Serial.printf("  - Manual override: %s\n", switchesLocal[i].manualOverride ? "YES" : "NO");
-        Serial.printf("  - Motion detected: %s (switch uses PIR: %s)\n", 
-          motionDetected ? "YES" : "NO", switchesLocal[i].usePir ? "YES" : "NO");
-        Serial.printf("  - Motion enabled: %s\n", motionConfig.enabled ? "YES" : "NO");
       }
     }
   }
@@ -1481,37 +1012,20 @@ void setup() {
   }
   
   // Initialize watchdog (15 seconds)
-  esp_task_wdt_init(WDT_TIMEOUT_MS / 1000, true);  // timeout in seconds
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = WDT_TIMEOUT_MS,
+    .trigger_panic = true
+  };
+  esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
   Serial.printf("[WDT] Watchdog initialized: %d seconds\n", WDT_TIMEOUT_MS / 1000);
   
   // Initialize switches
   initSwitches();
   
-  // Load motion sensor config
-  prefs.begin("motion_cfg", true);
-  motionConfig.enabled = prefs.getBool("enabled", false);
-  motionConfig.type = prefs.getString("type", "hc-sr501");
-  motionConfig.autoOffDelay = prefs.getInt("autoOff", 30);
-  motionConfig.dualMode = prefs.getBool("dualMode", false);
-  motionConfig.detectionLogic = prefs.getString("logic", "and");
-  motionConfig.scheduleEnabled = prefs.getBool("schedEnabled", false);
-  motionConfig.activeStartTime = prefs.getString("startTime", "08:30");
-  motionConfig.activeEndTime = prefs.getString("endTime", "17:30");
-  // Load activeDays bitfield if present
-  uint8_t daysByte = prefs.getUChar("activeDays", 0);
-  for (int d=0; d<7; d++) motionConfig.activeDays[d] = (daysByte & (1<<d)) ? 1 : 0;
-  motionConfig.timezone = prefs.getString("timezone", "UTC");
-  prefs.end();
-
-  ensureDefaultActiveDays();
-  applyTimezone(motionConfig.timezone);
-  
-  // Always initialize motion sensor
-  initMotionSensor();
-  Serial.printf("[SETUP] Motion: %s, GPIO: %d\n", 
-    motionConfig.enabled ? "ENABLED" : "DISABLED", 
-    motionConfig.primaryGpio);
+  // Initialize status LED and show welcome sequence
+  initStatusLED();
+  welcomeLight();
   
   // Setup WiFi
   setup_wifi();
@@ -1543,12 +1057,7 @@ void loop() {
   handleManualSwitches();
   esp_task_wdt_reset();
   
-  // PRIORITY 2: Sample and handle motion sensor (non-blocking sampler)
-  sampleMotionSensorsNonBlocking();
-  handleMotionSensor();
-  esp_task_wdt_reset();
-  
-  // PRIORITY 3: Network operations (can be slower)
+  // PRIORITY 2: Network operations (can be slower)
   updateConnectionStatus();
   
   // Periodic state updates
@@ -1584,6 +1093,7 @@ void loop() {
     for (int i = 0; i < NUM_SWITCHES; i++) {
       digitalWrite(switchesLocal[i].relayGpio, 
         switchesLocal[i].state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+      digitalWrite(ledPins[i], switchesLocal[i].state ? HIGH : LOW);
     }
     lastRelayCheck = millis();
   }

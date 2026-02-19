@@ -13,12 +13,12 @@
 // General firmware configuration
 #define NUM_SWITCHES 6
 #define MAX_COMMAND_QUEUE 16
-#define MANUAL_DEBOUNCE_MS 200
+#define MANUAL_DEBOUNCE_MS 50
 #define WDT_TIMEOUT_MS 15000  // 15 seconds watchdog
 
 // MQTT Broker Configuration - Update this to match your network
-#define MQTT_BROKER "172.16.3.171"      // Backend server IP
-#define MQTT_PORT 1883                  // MQTT port
+#define MQTT_BROKER "10.36.48.55"      // Backend server IP
+#define MQTT_PORT 1883                 // MQTT port
 
 // MQTT topics
 #define STATE_TOPIC "esp32/state"
@@ -47,11 +47,30 @@
 // are intentionally mutable because CONFIG messages can update GPIO mapping
 // at runtime.
 static int relayPins[NUM_SWITCHES] = {16, 17, 18, 19, 21, 22};
-static int manualSwitchPins[NUM_SWITCHES] = {25, 26, 27, 32, 33, 23};
+static int manualSwitchPins[NUM_SWITCHES] = {34, 35, 36, 39, 32, 33};
+static int ledPins[NUM_SWITCHES] = {23, 25, 26, 27, 13, 14};  // LED indicators aligned with relays
 
 // Status LED GPIO (used by blink_status.h). Set to a sensible default
 // for most ESP32 dev boards; change if your board uses a different pin.
 #define STATUS_LED_PIN 2
+
+// LED Brightness Control (PWM)
+// Range: 0-255 (0 = off, 255 = full brightness)
+// Reduce this value to dim the LED. Try 50-100 for a softer glow.
+#define LED_BRIGHTNESS 80
+
+// Welcome Light on Boot - Mode 3 (Car Unlock Chase Effect)
+// Enable welcome light sequence when device powers on
+#define ENABLE_WELCOME_LIGHT true
+// Mode 3: Chase effect - stylish staccato flashes like luxury car unlock
+#define WELCOME_LIGHT_MODE 3
+// Peak brightness during welcome sequence (0-255)
+#define WELCOME_LIGHT_PEAK 200
+// Duration of welcome sequence in milliseconds (3000 = 3 seconds)
+#define WELCOME_LIGHT_DURATION 3000
+// Duration of each flash (bright) and off phase in milliseconds
+#define WELCOME_LIGHT_FLASH_ON 100   // 100ms bright
+#define WELCOME_LIGHT_FLASH_OFF 100  // 100ms dark
 
 // Relay configuration
 #define RELAY_ACTIVE_HIGH false  // Set to true if relays are active HIGH, false if active LOW
@@ -65,36 +84,11 @@ static int manualSwitchPins[NUM_SWITCHES] = {25, 26, 27, 32, 33, 23};
 // Enable verbose manual-switch diagnostics. Set to true only for debugging
 // (will increase serial output). Default: false
 #define DEBUG_MANUAL false
-// Motion Sensor Configuration (Dual Sensor Support)
-// Using INPUT-ONLY GPIO pins (34-39) - NO conflict with relays or manual switches!
-// NOTE: These are DEFAULT values. Actual configuration is set via web application
-// and received through MQTT from backend (esp32/config topic)
-#define MOTION_SENSOR_ENABLED false     // Default: disabled (configured via web UI)
-#define MOTION_SENSOR_TYPE "hc-sr501"   // Default: HC-SR501 PIR (configured via web UI)
-#define MOTION_SENSOR_PIN 34            // DEFAULT PRIMARY sensor GPIO (configured via web UI)
-#define SECONDARY_SENSOR_PIN 35         // DEFAULT SECONDARY sensor GPIO (configured via web UI)
-#define MOTION_AUTO_OFF_DELAY 30        // Default: 30 seconds (configured via web UI)
-#define MOTION_SENSITIVITY 50           // Default: 50% (configured via web UI)
-#define MOTION_DETECTION_RANGE 7        // Default: 7 meters (configured via web UI)
-#define DETECTION_LOGIC "and"           // Default: AND logic (configured via web UI)
-
-// Motion input mode: choose internal pull-down vs plain input
-// Some PIR modules may not work with internal pull-downs; set to false to use INPUT instead.
-#define MOTION_USE_INPUT_PULLDOWN true
-
-// Non-blocking debounce settings (sample over multiple loop cycles)
-// Sample interval and required consecutive consistent samples
-#define MOTION_SAMPLE_INTERVAL_MS 50
-#define MOTION_REQUIRED_CONSISTENT 3
-
-// Time after boot to ignore motion sensors (ms)
-#define MOTION_BOOT_GRACE_MS 5000
-
 // GPIO Pin Usage Summary:
 // Relays:         16, 17, 18, 19, 21, 22 (OUTPUT)
-// Manual Switches: 25, 26, 27, 32, 33, 23 (INPUT with pull-up)
-// PIR Sensor:     34 (INPUT-ONLY, no conflict!)
-// Microwave Sensor: 35 (INPUT-ONLY, no conflict!)
-// Available:      36, 39 (INPUT-ONLY), 0, 2, 4, 5, 12, 13, 14, 15 (I/O)
+// LEDs:           23, 25, 26, 27, 13, 14 (OUTPUT - indicators)
+// Manual Switches: 34, 35, 36, 39, 32, 33 (INPUT - external pull-up/down required for 34-39)
+// Status LED:     2 (OUTPUT - WiFi/MQTT status)
+// Available:      0, 4, 5, 12, 15 (strap pins), 1, 3 (UART)
 
 #endif // CONFIG_H
