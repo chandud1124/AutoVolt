@@ -16,8 +16,14 @@
 #define MANUAL_DEBOUNCE_MS 50
 #define WDT_TIMEOUT_MS 15000  // 15 seconds watchdog
 
+// Bulk command timing (milliseconds)
+// Stagger delay between relay switches during bulk commands to reduce inrush current
+#define RELAY_SWITCH_STAGGER_MS 100
+// Minimum cooldown between toggles of the same relay (prevents chattering)
+#define RELAY_MIN_TOGGLE_MS 200
+
 // MQTT Broker Configuration - Update this to match your network
-#define MQTT_BROKER "10.36.48.55"      // Backend server IP
+#define MQTT_BROKER "172.16.3.171"     // Backend server IP
 #define MQTT_PORT 1883                 // MQTT port
 
 // MQTT topics
@@ -47,8 +53,8 @@
 // are intentionally mutable because CONFIG messages can update GPIO mapping
 // at runtime.
 static int relayPins[NUM_SWITCHES] = {16, 17, 18, 19, 21, 22};
-static int manualSwitchPins[NUM_SWITCHES] = {34, 35, 36, 39, 32, 33};
-static int ledPins[NUM_SWITCHES] = {23, 25, 26, 27, 13, 14};  // LED indicators aligned with relays
+static int manualSwitchPins[NUM_SWITCHES] = {25, 26, 27, 32, 33, 23};
+static int ledPins[NUM_SWITCHES] = {13, 14, 4, 5, 12, 15};  // LED indicators aligned with relays
 
 // Status LED GPIO (used by blink_status.h). Set to a sensible default
 // for most ESP32 dev boards; change if your board uses a different pin.
@@ -56,12 +62,12 @@ static int ledPins[NUM_SWITCHES] = {23, 25, 26, 27, 13, 14};  // LED indicators 
 
 // LED Brightness Control (PWM)
 // Range: 0-255 (0 = off, 255 = full brightness)
-// Reduce this value to dim the LED. Try 50-100 for a softer glow.
-#define LED_BRIGHTNESS 80
+// Reduce this value to dim the LED. Try 20-50 for a softer glow.
+#define LED_BRIGHTNESS 25
 
-// Welcome Light on Boot - Mode 3 (Car Unlock Chase Effect)
+// Welcome Light on Boot - Disabled
 // Enable welcome light sequence when device powers on
-#define ENABLE_WELCOME_LIGHT true
+#define ENABLE_WELCOME_LIGHT false
 // Mode 3: Chase effect - stylish staccato flashes like luxury car unlock
 #define WELCOME_LIGHT_MODE 3
 // Peak brightness during welcome sequence (0-255)
@@ -86,9 +92,9 @@ static int ledPins[NUM_SWITCHES] = {23, 25, 26, 27, 13, 14};  // LED indicators 
 #define DEBUG_MANUAL false
 // GPIO Pin Usage Summary:
 // Relays:         16, 17, 18, 19, 21, 22 (OUTPUT)
-// LEDs:           23, 25, 26, 27, 13, 14 (OUTPUT - indicators)
-// Manual Switches: 34, 35, 36, 39, 32, 33 (INPUT - external pull-up/down required for 34-39)
+// LEDs:           13, 14, 4, 5, 12, 15 (OUTPUT - indicators)
+// Manual Switches: 25, 26, 27, 32, 33, 23 (INPUT - INPUT_PULLUP supported)
 // Status LED:     2 (OUTPUT - WiFi/MQTT status)
-// Available:      0, 4, 5, 12, 15 (strap pins), 1, 3 (UART)
+// Available:      34, 35, 36, 39 (input-only), 0 (strap pin), 1, 3 (UART)
 
 #endif // CONFIG_H

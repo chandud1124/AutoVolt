@@ -272,9 +272,15 @@ export default memo(function DeviceCard({
                       <Button
                         size="sm"
                         variant={isOn ? 'default' : 'outline'}
-                        onClick={() => {
+                        onClick={(e) => {
+                          // Prevent scroll position changes on click
+                          e.currentTarget.blur();
                           const sid = sw.id;
                           if (sid) onToggleSwitch(device.id, sid);
+                        }}
+                        onMouseDown={(e) => {
+                          // Prevent default focus behavior that can cause scroll
+                          e.preventDefault();
                         }}
                         disabled={!isOnline}
                         className={`flex-shrink-0 min-w-[60px] ${isOn ? 'switch-on' : ''}`}

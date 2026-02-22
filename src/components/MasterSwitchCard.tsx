@@ -191,6 +191,7 @@ export const MasterSwitchCard: React.FC<MasterSwitchCardProps> = ({
                     setForcedState(false);
                     if (!allOff) onMasterToggle(false);
                   }}
+                  onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
                   disabled={onlineDevices === 0 || isBusy}
                   className="data-[state=checked]:bg-primary"
                 />

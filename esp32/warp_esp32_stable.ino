@@ -109,6 +109,9 @@ unsigned long lastToggleAt[NUM_SWITCHES] = {0};
 unsigned long lastPressTime[NUM_SWITCHES] = {0};
 uint8_t debounceCounter[NUM_SWITCHES] = {0};
 
+// Track if PWM for LEDs has been initialized (to avoid breaking PWM with pinMode)
+bool ledPwmInitialized = false;
+
 // ========================================
 // UTILITY FUNCTIONS
 // ========================================
@@ -197,9 +200,16 @@ void initSwitches() {
     }
     
     // Log initial states for debugging
-    Serial.printf("[INIT] Switch %d: GPIO %d, state=%s, momentary=%s\n",
-      i, switchesLocal[i].relayGpio, switchesLocal[i].state ? "ON" : "OFF",
-      switchesLocal[i].manualMomentary ? "YES" : "NO");
+    bool inputOnlyManual = (switchesLocal[i].manualGpio >= 34 && switchesLocal[i].manualGpio <= 39);
+    Serial.printf("[INIT] Switch %d: relayGPIO=%d manualGPIO=%d state=%s momentary=%s inputOnlyManual=%s\n",
+      i, switchesLocal[i].relayGpio, switchesLocal[i].manualGpio,
+      switchesLocal[i].state ? "ON" : "OFF",
+      switchesLocal[i].manualMomentary ? "YES" : "NO",
+      inputOnlyManual ? "YES" : "NO");
+    if (inputOnlyManual) {
+      Serial.printf("[MANUAL-WARN] Switch %d manual GPIO %d has NO internal pull resistor on ESP32. Use external 10k pull-up/pull-down.\n",
+        i, switchesLocal[i].manualGpio);
+    }
   }
   
   // Apply loaded states to relays
@@ -207,8 +217,16 @@ void initSwitches() {
     pinMode(switchesLocal[i].relayGpio, OUTPUT);
     digitalWrite(switchesLocal[i].relayGpio, 
       switchesLocal[i].state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-    pinMode(ledPins[i], OUTPUT);
-    digitalWrite(ledPins[i], switchesLocal[i].state ? HIGH : LOW);
+    
+    // Only configure LED pins if PWM is not yet initialized
+    // After PWM init, use ledcWrite() to control LEDs
+    if (!ledPwmInitialized) {
+      pinMode(ledPins[i], OUTPUT);
+      digitalWrite(ledPins[i], LOW);  // Start off, PWM will control after initStatusLED()
+    } else {
+      // PWM already initialized, apply correct state
+      ledcWrite(ledPins[i], switchesLocal[i].state ? LED_BRIGHTNESS : 0);
+    }
     pinSetup[i] = false;
     lastToggleAt[i] = millis();
   }
@@ -232,12 +250,18 @@ void queueSwitchCommand(int gpio, bool state, uint8_t source, String userId, Str
   }
   if (!validGpio) {
     Serial.printf("[CMD] Rejected: GPIO %d not configured for any switch\n", gpio);
+    if (source == CMD_SRC_BACKEND) {
+      publishCommandAck(gpio, state, false, false, "rejected_invalid_gpio", source, userId, userName);
+    }
     return;
   }
 
   int nextTail = (commandQueueTail + 1) % MAX_COMMAND_QUEUE;
   if (nextTail == commandQueueHead) {
     Serial.println("[CMD] Queue full, dropping command");
+    if (source == CMD_SRC_BACKEND) {
+      publishCommandAck(gpio, state, false, false, "queue_full", source, userId, userName);
+    }
     return;
   }
   // Deduplicate/merge: if a command for this gpio already exists in the
@@ -249,13 +273,21 @@ void queueSwitchCommand(int gpio, bool state, uint8_t source, String userId, Str
     if (commandQueue[i].gpio == gpio) {
       if (commandQueue[i].state == state) {
         Serial.printf("[CMD] Skip enqueue - already queued same state for GPIO %d\n", gpio);
+        if (source == CMD_SRC_BACKEND) {
+          publishCommandAck(gpio, state, true, false, "already_queued", source, userId, userName);
+        }
         return;
       } else {
         // Update existing queued command to the new desired state
         commandQueue[i].state = state;
         commandQueue[i].timestamp = millis();
         commandQueue[i].source = source;
+        commandQueue[i].userId = userId;
+        commandQueue[i].userName = userName;
         Serial.printf("[CMD] Updated queued command for GPIO %d -> %s\n", gpio, state ? "ON" : "OFF");
+        if (source == CMD_SRC_BACKEND) {
+          publishCommandAck(gpio, state, true, false, "queue_updated", source, userId, userName);
+        }
         return;
       }
     }
@@ -264,11 +296,12 @@ void queueSwitchCommand(int gpio, bool state, uint8_t source, String userId, Str
 
   // If current physical state already matches desired and there is no
   // queued command for this gpio, nothing to do.
+  // NOTE: Still enqueue to force physical GPIO sync even if software state matches
   for (int s = 0; s < NUM_SWITCHES; s++) {
     if (switchesLocal[s].relayGpio == gpio) {
       if (switchesLocal[s].state == state) {
-        Serial.printf("[CMD] Skip enqueue - GPIO %d already in desired state\n", gpio);
-        return;
+        Serial.printf("[CMD] GPIO %d software state matches desired (%s), but forcing re-apply\n", gpio, state ? "ON" : "OFF");
+        // Don't return - still enqueue to ensure physical GPIO sync
       }
       break;
     }
@@ -286,7 +319,16 @@ void processCommandQueue() {
   // and audible disturbance when bulk updates happen.
   static unsigned long lastProcess = 0;
   static unsigned long lastSwitchApply = 0;
+  static bool initialized = false;
   unsigned long now = millis();
+  
+  // Initialize lastSwitchApply to current time on first run to avoid
+  // processing all queued commands instantly due to huge elapsed time
+  if (!initialized) {
+    lastSwitchApply = now;
+    initialized = true;
+  }
+  
   if (now - lastProcess < 10) return;
   lastProcess = now;
 
@@ -299,6 +341,10 @@ void processCommandQueue() {
   // RELAY_SWITCH_STAGGER_MS logically.
   unsigned long elapsed = now - lastSwitchApply;
   unsigned int availableSlots = (elapsed / RELAY_SWITCH_STAGGER_MS);
+  // Always allow at least 1 slot if queue has items and some time has passed
+  if (availableSlots == 0 && elapsed >= (RELAY_SWITCH_STAGGER_MS / 2)) {
+    availableSlots = 1;
+  }
   if (availableSlots == 0) return;
 
   // Bound the number of commands we apply in one invocation to avoid
@@ -336,6 +382,9 @@ void processCommandQueue() {
     if (si == -1) {
       // Unknown gpio; drop command
       Serial.printf("[CMD] Unknown GPIO %d - dropping\n", cmd.gpio);
+      if (cmd.source == CMD_SRC_BACKEND) {
+        publishCommandAck(cmd.gpio, cmd.state, false, false, "unknown_gpio", cmd.source, cmd.userId, cmd.userName);
+      }
       commandQueueHead = (commandQueueHead + 1) % MAX_COMMAND_QUEUE;
       continue;
     }
@@ -352,22 +401,27 @@ void processCommandQueue() {
         Serial.printf("[CMD] Postponed (cooldown) GPIO %d -> %s\n", cmd.gpio, cmd.state ? "ON" : "OFF");
       } else {
         Serial.printf("[CMD] Drop (cooldown & queue full) GPIO %d -> %s\n", cmd.gpio, cmd.state ? "ON" : "OFF");
+        if (cmd.source == CMD_SRC_BACKEND) {
+          publishCommandAck(cmd.gpio, cmd.state, false, false, "dropped_cooldown_queue_full", cmd.source, cmd.userId, cmd.userName);
+        }
       }
       // remove current head and pause bulk processing
       commandQueueHead = (commandQueueHead + 1) % MAX_COMMAND_QUEUE;
       break;
     }
 
-    // Apply the command (but avoid unnecessary writes)
+    // Apply the command - always write to GPIO to ensure sync
     bool cur = switchesLocal[si].state;
-    if (cur == cmd.state) {
-      Serial.printf("[CMD] No-op: GPIO %d already %s\n", cmd.gpio, cmd.state ? "ON" : "OFF");
-    } else {
-      switchesLocal[si].state = cmd.state;
-      switchesLocal[si].manualOverride = false;
-      digitalWrite(switchesLocal[si].relayGpio, cmd.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-      digitalWrite(ledPins[si], cmd.state ? HIGH : LOW);
-      switchesLocal[si].gpio = switchesLocal[si].relayGpio;
+    bool stateChanged = (cur != cmd.state);
+    
+    // Always apply physical GPIO to ensure hardware matches software
+    switchesLocal[si].state = cmd.state;
+    switchesLocal[si].manualOverride = false;
+    digitalWrite(switchesLocal[si].relayGpio, cmd.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+    ledcWrite(ledPins[si], cmd.state ? LED_BRIGHTNESS : 0);
+    switchesLocal[si].gpio = switchesLocal[si].relayGpio;
+    
+    if (stateChanged) {
       saveSwitchConfigToNVS();
       Serial.printf("[CMD] Applied: GPIO %d -> %s\n", cmd.gpio, cmd.state ? "ON" : "OFF");
       // record physical toggle time to enforce cooldown
@@ -389,7 +443,13 @@ void processCommandQueue() {
         mqttClient.publish(TELEMETRY_TOPIC, STATUS_QOS, false, evbuf, evn);
         Serial.printf("[TELEM] Published switch_event gpio=%d source=%s user=%s\n", cmd.gpio, cmdSourceName(cmd.source), cmd.userName.length() > 0 ? cmd.userName.c_str() : "system");
       }
+    } else {
+      Serial.printf("[CMD] Re-synced GPIO %d -> %s (state was already correct)\n", cmd.gpio, cmd.state ? "ON" : "OFF");
     }
+    if (cmd.source == CMD_SRC_BACKEND) {
+      publishCommandAck(cmd.gpio, cmd.state, true, stateChanged, stateChanged ? "applied" : "resynced", cmd.source, cmd.userId, cmd.userName);
+    }
+    sendStateUpdate(true);
 
     // advance the queue and account for the slot we consumed
     commandQueueHead = (commandQueueHead + 1) % MAX_COMMAND_QUEUE;
@@ -420,11 +480,14 @@ void handleManualSwitches() {
     if (!pinSetup[i]) {
       bool inputOnly = (sw.manualGpio >= 34 && sw.manualGpio <= 39);
       pinMode(sw.manualGpio, inputOnly ? INPUT : (MANUAL_USE_INPUT_PULLDOWN ? INPUT_PULLDOWN : INPUT_PULLUP));
+      if (inputOnly) {
+        Serial.printf("[MANUAL-WARN] GPIO %d is input-only (34-39) and supports no internal pull resistor. For active-low-to-GND wiring, add external 10k pull-up to 3V3.\n", sw.manualGpio);
+      }
       pinMode(sw.relayGpio, OUTPUT);
       digitalWrite(sw.relayGpio, 
         sw.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-      pinMode(ledPins[i], OUTPUT);
-      digitalWrite(ledPins[i], sw.state ? HIGH : LOW);
+      // LED PWM already configured in initStatusLED(), just set state
+      ledcWrite(ledPins[i], sw.state ? LED_BRIGHTNESS : 0);
 
       int initialLevel = digitalRead(sw.manualGpio);
       sw.lastManualLevel = initialLevel;
@@ -475,7 +538,7 @@ void handleManualSwitches() {
                 sw.manualOverride = true;
                 digitalWrite(sw.relayGpio, 
                   sw.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-                digitalWrite(ledPins[i], sw.state ? HIGH : LOW);
+                ledcWrite(ledPins[i], sw.state ? LED_BRIGHTNESS : 0);
                 // record manual physical toggle time to enforce cooldown
                 lastToggleAt[i] = millis();
                 lastPressTime[i] = now;
@@ -494,7 +557,7 @@ void handleManualSwitches() {
               sw.manualOverride = true;
               digitalWrite(sw.relayGpio, 
                 sw.state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-              digitalWrite(ledPins[i], sw.state ? HIGH : LOW);
+              ledcWrite(ledPins[i], sw.state ? LED_BRIGHTNESS : 0);
               // record manual physical toggle time to enforce cooldown
               lastToggleAt[i] = millis();
               saveSwitchConfigToNVS();
@@ -554,6 +617,30 @@ void publishManualSwitchEvent(int gpio, bool state, int physicalPin) {
   char buf[128];
   size_t n = serializeJson(doc, buf, sizeof(buf));
   if (n > 0 && mqttClient.connected()) {
+    mqttClient.publish(TELEMETRY_TOPIC, STATUS_QOS, false, buf, n);
+  }
+}
+
+void publishCommandAck(int gpio, bool requestedState, bool applied, bool stateChanged, const char* result, uint8_t source, const String& userId, const String& userName) {
+  if (!mqttClient.connected()) return;
+
+  DynamicJsonDocument doc(256);
+  doc["mac"] = WiFi.macAddress();
+  doc["secret"] = DEVICE_SECRET;
+  doc["type"] = "command_ack";
+  doc["gpio"] = gpio;
+  doc["requestedState"] = requestedState;
+  doc["applied"] = applied;
+  doc["stateChanged"] = stateChanged;
+  doc["result"] = result;
+  doc["source"] = cmdSourceName(source);
+  if (userId.length() > 0) doc["userId"] = userId;
+  if (userName.length() > 0) doc["userName"] = userName;
+  doc["timestamp"] = millis();
+
+  char buf[256];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  if (n > 0) {
     mqttClient.publish(TELEMETRY_TOPIC, STATUS_QOS, false, buf, n);
   }
 }
@@ -705,7 +792,7 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
 
   // Handle SWITCH_TOPIC
   if (String(topic) == SWITCH_TOPIC) {
-    DynamicJsonDocument doc(256);
+    DynamicJsonDocument doc(512);  // Increased for bulk commands
     if (deserializeJson(doc, message) == DeserializationError::Ok) {
       String targetMac = doc["mac"];
       String targetSecret = doc["secret"];
@@ -714,32 +801,59 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
       bool macMatches = normalizeMac(targetMac).equalsIgnoreCase(normalizeMac(myMac));
       bool secretMatches = (targetSecret == String(DEVICE_SECRET));
       if (macMatches && secretMatches) {
-        // Accept multiple possible field names for GPIO and state for compatibility
-        int gpio = -1;
-        if (doc.containsKey("gpio")) {
-          gpio = (int)doc["gpio"];
-        } else if (doc.containsKey("relayGpio")) {
-          gpio = (int)doc["relayGpio"];
-        } else if (doc.containsKey("index")) {
-          int idx = (int)doc["index"];
-          if (idx >= 0 && idx < NUM_SWITCHES) gpio = switchesLocal[idx].relayGpio;
-        }
-
-        bool state = false;
-        if (doc.containsKey("state")) state = (bool)doc["state"];
-        else if (doc.containsKey("value")) state = (bool)doc["value"];
-
         String userId = "";
         String userName = "";
         if (doc.containsKey("userId")) userId = String((const char*)doc["userId"]);
         if (doc.containsKey("userName")) userName = String((const char*)doc["userName"]);
 
-        if (gpio >= 0) {
-          Serial.printf("[MQTT] SWITCH accepted -> gpio=%d state=%d user=%s\n", gpio, state ? 1 : 0, userName.length() > 0 ? userName.c_str() : "system");
-          queueSwitchCommand(gpio, state, CMD_SRC_BACKEND, userId, userName);
-          processCommandQueue();
+        // Support bulk commands via "switches" array
+        if (doc.containsKey("switches") && doc["switches"].is<JsonArray>()) {
+          JsonArray switches = doc["switches"].as<JsonArray>();
+          int queuedCount = 0;
+          for (JsonObject sw : switches) {
+            int gpio = -1;
+            if (sw.containsKey("gpio")) gpio = (int)sw["gpio"];
+            else if (sw.containsKey("relayGpio")) gpio = (int)sw["relayGpio"];
+            else if (sw.containsKey("index")) {
+              int idx = (int)sw["index"];
+              if (idx >= 0 && idx < NUM_SWITCHES) gpio = switchesLocal[idx].relayGpio;
+            }
+            
+            bool state = false;
+            if (sw.containsKey("state")) state = (bool)sw["state"];
+            else if (sw.containsKey("value")) state = (bool)sw["value"];
+            
+            if (gpio >= 0) {
+              queueSwitchCommand(gpio, state, CMD_SRC_BACKEND, userId, userName);
+              queuedCount++;
+            }
+          }
+          Serial.printf("[MQTT] BULK SWITCH: queued %d commands\n", queuedCount);
+          // Don't call processCommandQueue here - let main loop handle staggered processing
         } else {
-          Serial.println("[MQTT] SWITCH accepted but no gpio/index/relayGpio found in payload");
+          // Single switch command (legacy format)
+          int gpio = -1;
+          if (doc.containsKey("gpio")) {
+            gpio = (int)doc["gpio"];
+          } else if (doc.containsKey("relayGpio")) {
+            gpio = (int)doc["relayGpio"];
+          } else if (doc.containsKey("index")) {
+            int idx = (int)doc["index"];
+            if (idx >= 0 && idx < NUM_SWITCHES) gpio = switchesLocal[idx].relayGpio;
+          }
+
+          bool state = false;
+          if (doc.containsKey("state")) state = (bool)doc["state"];
+          else if (doc.containsKey("value")) state = (bool)doc["value"];
+
+          if (gpio >= 0) {
+            Serial.printf("[MQTT] SWITCH accepted -> gpio=%d state=%d user=%s\n", gpio, state ? 1 : 0, userName.length() > 0 ? userName.c_str() : "system");
+            queueSwitchCommand(gpio, state, CMD_SRC_BACKEND, userId, userName);
+            // Process immediately for single commands
+            processCommandQueue();
+          } else {
+            Serial.println("[MQTT] SWITCH accepted but no gpio/index/relayGpio/switches found in payload");
+          }
         }
       } else {
         // Helpful debug output when a SWITCH command is ignored so user can trace
@@ -765,25 +879,40 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
       String myMac = WiFi.macAddress();
 
       if (normalizeMac(targetMac).equalsIgnoreCase(normalizeMac(myMac)) && targetSecret == String(DEVICE_SECRET)) {
+        Serial.println("[CONFIG] Received config for THIS device");
+        
         // Update switch config
         if (doc.containsKey("switches")) {
           JsonArray sws = doc["switches"];
           int n = sws.size();
           if (n > 0 && n <= NUM_SWITCHES) {
-                for (int i = 0; i < n; i++) {
-                  JsonObject sw = sws[i];
-                  if (sw.containsKey("gpio")) {
-                    relayPins[i] = (int)sw["gpio"];
-                  }
-                  if (sw.containsKey("manualGpio")) {
-                    manualSwitchPins[i] = (int)sw["manualGpio"];
-                  }
-                  if (sw.containsKey("manualMode")) {
-                    const char* mode_c = sw["manualMode"] | "";
-                    String mode = String(mode_c);
-                    switchesLocal[i].manualMomentary = (mode == "momentary");
-                  }
-                }
+            // Preserve current relay states before updating config
+            bool preservedStates[NUM_SWITCHES];
+            for (int i = 0; i < NUM_SWITCHES; i++) {
+              preservedStates[i] = switchesLocal[i].state;
+            }
+            
+            for (int i = 0; i < n; i++) {
+              JsonObject sw = sws[i];
+              if (sw.containsKey("gpio")) {
+                relayPins[i] = (int)sw["gpio"];
+                switchesLocal[i].relayGpio = relayPins[i];
+              }
+              if (sw.containsKey("manualGpio")) {
+                manualSwitchPins[i] = (int)sw["manualGpio"];
+                switchesLocal[i].manualGpio = manualSwitchPins[i];
+              } else if (sw.containsKey("manualSwitchGpio")) {
+                manualSwitchPins[i] = (int)sw["manualSwitchGpio"];
+                switchesLocal[i].manualGpio = manualSwitchPins[i];
+              }
+              if (sw.containsKey("manualMode")) {
+                const char* mode_c = sw["manualMode"] | "";
+                String mode = String(mode_c);
+                switchesLocal[i].manualMomentary = (mode == "momentary");
+              }
+              // Restore preserved state
+              switchesLocal[i].state = preservedStates[i];
+            }
 
             // Persist to NVS
             prefs.begin("switch_cfg", false);
@@ -791,14 +920,26 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
               prefs.putInt(("relay" + String(i)).c_str(), relayPins[i]);
               prefs.putInt(("manual" + String(i)).c_str(), manualSwitchPins[i]);
               prefs.putBool(("momentary" + String(i)).c_str(), switchesLocal[i].manualMomentary);
+              prefs.putBool(("state" + String(i)).c_str(), switchesLocal[i].state);
             }
             prefs.end();
 
-            initSwitches();
-            Serial.println("[CONFIG] Switch config updated from server");
+            // Re-apply relay and LED states without calling full initSwitches()
+            for (int i = 0; i < NUM_SWITCHES; i++) {
+              pinMode(switchesLocal[i].relayGpio, OUTPUT);
+              digitalWrite(switchesLocal[i].relayGpio, 
+                switchesLocal[i].state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
+              ledcWrite(ledPins[i], switchesLocal[i].state ? LED_BRIGHTNESS : 0);
+              pinSetup[i] = false;  // Force re-setup of manual switch pins
+            }
+            
+            Serial.printf("[CONFIG] Switch config updated - %d switches configured\n", n);
+            sendStateUpdate(true);
           }
         }
-
+      } else {
+        // Config is for a different device - ignore silently
+        // Serial.println("[CONFIG] Ignoring config for different device");
       }
     }
   }
@@ -866,21 +1007,28 @@ void updateConnectionStatus() {
 // ========================================
 void initStatusLED() {
   // Initialize PWM for LED brightness control
-  // Channel 0, frequency 5000 Hz, resolution 8-bit (0-255)
-  ledcSetup(0, 5000, 8);
-  ledcAttachPin(STATUS_LED_PIN, 0);
-  pinMode(STATUS_LED_PIN, OUTPUT);
+  // Frequency 5000 Hz, resolution 8-bit (0-255)
+  // ESP32 Arduino Core 3.x: ledcAttach combines setup and attach
+  ledcAttach(STATUS_LED_PIN, 5000, 8);
+  
+  // Initialize PWM for relay indicator LEDs (dimmed brightness)
+  for (int i = 0; i < NUM_SWITCHES; i++) {
+    ledcAttach(ledPins[i], 5000, 8);
+  }
+  
+  // Mark PWM as initialized so initSwitches() won't break it
+  ledPwmInitialized = true;
 }
 
 void applyRelayLedStates() {
   for (int i = 0; i < NUM_SWITCHES; i++) {
-    digitalWrite(ledPins[i], switchesLocal[i].state ? HIGH : LOW);
+    ledcWrite(ledPins[i], switchesLocal[i].state ? LED_BRIGHTNESS : 0);
   }
 }
 
 void setAllRelayLeds(bool on) {
   for (int i = 0; i < NUM_SWITCHES; i++) {
-    digitalWrite(ledPins[i], on ? HIGH : LOW);
+    ledcWrite(ledPins[i], on ? LED_BRIGHTNESS : 0);
   }
 }
 
@@ -911,13 +1059,13 @@ void welcomeLight() {
       brightness = 0;
     }
     
-    ledcWrite(0, brightness);
+    ledcWrite(STATUS_LED_PIN, brightness);
     setAllRelayLeds(phaseTime < flashOn);
     delay(5);  // Small delay for responsive animation
   }
   
   // Ensure LED is off after welcome sequence
-  ledcWrite(0, 0);
+  ledcWrite(STATUS_LED_PIN, 0);
   applyRelayLedStates();
   delay(100);
   Serial.println("[LED] Welcome sequence complete");
@@ -940,7 +1088,7 @@ void blinkStatus() {
     brightness = LED_BRIGHTNESS;
   }
 
-  ledcWrite(0, brightness);
+  ledcWrite(STATUS_LED_PIN, brightness);
 }
 void checkSystemHealth() {
   static unsigned long lastCheck = 0;
@@ -965,28 +1113,26 @@ void checkSystemHealth() {
 }
 
 void logUnexpectedActivations() {
+  // Removed misleading alerts - switches can be ON from backend commands
+  // which is normal operation. Only log status periodically for debugging.
   static unsigned long lastLog = 0;
-  if (millis() - lastLog < 10000) return; // Log every 10 seconds
+  if (millis() - lastLog < 30000) return; // Log every 30 seconds
   lastLog = millis();
   
+  int activeCount = 0;
   for (int i = 0; i < NUM_SWITCHES; i++) {
-    if (switchesLocal[i].state) {
-      // Check if this switch should be on
-      bool shouldBeOn = false;
-      
-      // Check manual override
-      if (switchesLocal[i].manualOverride) {
-        shouldBeOn = true;
-      }
-      
-      // Check backend commands (recent commands in queue)
-      // ... check command queue for recent backend commands
-      
-      if (!shouldBeOn) {
-        Serial.printf("[ALERT] Switch %d (GPIO %d) is ON but no valid reason found!\n", i, switchesLocal[i].relayGpio);
-        Serial.printf("  - Manual override: %s\n", switchesLocal[i].manualOverride ? "YES" : "NO");
+    if (switchesLocal[i].state) activeCount++;
+  }
+  
+  if (activeCount > 0) {
+    Serial.printf("[STATUS] %d switches ON: ", activeCount);
+    for (int i = 0; i < NUM_SWITCHES; i++) {
+      if (switchesLocal[i].state) {
+        Serial.printf("GPIO%d%s ", switchesLocal[i].relayGpio, 
+          switchesLocal[i].manualOverride ? "(M)" : "");
       }
     }
+    Serial.println();
   }
 }
 
@@ -1027,6 +1173,9 @@ void setup() {
   initStatusLED();
   welcomeLight();
   
+  // Apply correct relay LED states after PWM initialization
+  applyRelayLedStates();
+  
   // Setup WiFi
   setup_wifi();
   
@@ -1065,6 +1214,9 @@ void loop() {
     sendStateUpdate(true);
     lastStateSend = millis();
   }
+
+  // Always process queued switch commands (even during MQTT reconnect windows)
+  processCommandQueue();
   
   // Network operations only when WiFi is connected
   if (WiFi.status() == WL_CONNECTED) {
@@ -1075,11 +1227,8 @@ void loop() {
       // Continue handling manual switches even if connecting
     }
     
-    // Process MQTT messages if connected (Async client handles network in background)
-    if (mqttClient.connected()) {
-      esp_task_wdt_reset();
-      processCommandQueue();
-    }
+    // Async client handles MQTT network I/O in background callbacks
+    esp_task_wdt_reset();
     sendHeartbeat();
   }
   
@@ -1093,7 +1242,7 @@ void loop() {
     for (int i = 0; i < NUM_SWITCHES; i++) {
       digitalWrite(switchesLocal[i].relayGpio, 
         switchesLocal[i].state ? (RELAY_ACTIVE_HIGH ? HIGH : LOW) : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-      digitalWrite(ledPins[i], switchesLocal[i].state ? HIGH : LOW);
+      ledcWrite(ledPins[i], switchesLocal[i].state ? LED_BRIGHTNESS : 0);
     }
     lastRelayCheck = millis();
   }

@@ -193,6 +193,7 @@ const Switches = () => {
                                 checked={!!sw.state}
                                 disabled={device.status !== 'online'}
                                 onCheckedChange={() => handleToggle(device.id, sw.id)}
+                                onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
                               />
                             </div>
                             <div className="flex justify-between text-[9px] text-muted-foreground">
